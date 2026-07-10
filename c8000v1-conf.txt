@@ -1,0 +1,67 @@
+! C8000V-1 (AZ1) - Gi1 10.1.1.10/27 (RouterSubnet1), Gi2 10.1.1.40/27 (ReceiverSubnet1)
+! BGP to VPC Route Server Endpoint-1 (10.1.1.13, ASN 65100) with BFD health check;
+! RS injects routes learned from this router into the Receiver route table.
+!
+hostname c8000v-1
+!
+ip multicast-routing distributed
+!
+interface GigabitEthernet1
+ description RouterSubnet1-underlay-RS-peering
+ ip address 10.1.1.10 255.255.255.224
+ bfd interval 300 min_rx 300 multiplier 3
+ no shutdown
+!
+interface GigabitEthernet2
+ description ReceiverSubnet1-multicast
+ ip address 10.1.1.40 255.255.255.224
+ ip pim sparse-mode
+ ! Pull group traffic onto Gi2 so the TGW multicast domain can distribute it.
+ ! Active forwarder = C8000V-1. Add one line per group.
+ ip igmp static-group 239.1.1.1
+ no shutdown
+!
+interface Tunnel100
+ description GRE-to-OnPrem-Lo0
+ ip address 172.16.100.2 255.255.255.252
+ ip pim sparse-mode
+ tunnel source GigabitEthernet1
+ tunnel destination 192.168.255.1
+ ip mtu 1476
+ ip tcp adjust-mss 1436
+!
+! GRE destination (on-prem Lo0) via Gi1 gateway -> RouterRouteTable -> TGW -> DXGW
+ip route 192.168.255.1 255.255.255.255 10.1.1.1
+! Rest of the VPC (other-AZ subnets, EICE) via Gi1 gateway; connected /27s stay preferred
+ip route 10.1.1.0 255.255.255.0 10.1.1.1
+!
+! RP is the on-prem router Lo0
+ip pim rp-address 192.168.255.1
+! Force PIM RPF for the RP and the source range over the tunnel
+! (the unicast route to Lo0 points at the underlay, where PIM does not run)
+ip mroute 192.168.255.1 255.255.255.255 Tunnel100
+ip mroute 172.20.51.0 255.255.255.0 Tunnel100
+!
+ip prefix-list ONPREM-LAN seq 5 permit 172.20.51.0/24
+ip prefix-list DENY-ALL seq 5 deny 0.0.0.0/0 le 32
+!
+router bgp 65200
+ bgp router-id 10.1.1.10
+ bgp log-neighbor-changes
+
+ ! VPC Route Server Endpoint-1 - BFD-based failover
+ neighbor 10.1.1.13 remote-as 65100
+ neighbor 10.1.1.13 fall-over bfd
+
+ ! On-prem router over the GRE overlay
+ neighbor 172.16.100.1 remote-as 65000
+
+ address-family ipv4
+  ! Re-advertise the on-prem LAN (learned over the tunnel) to the Route Server
+  neighbor 10.1.1.13 activate
+  neighbor 10.1.1.13 prefix-list ONPREM-LAN out
+
+  ! Advertise nothing to on-prem (it reaches the VPC via the DX underlay)
+  neighbor 172.16.100.1 activate
+  neighbor 172.16.100.1 prefix-list DENY-ALL out
+ exit-address-family

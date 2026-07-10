@@ -8,8 +8,9 @@ interface Loopback0
  ip address 192.168.255.1 255.255.255.255
  ip pim sparse-mode
 !
-! PIM is also required on the LAN (multicast source) interface - replace with the actual interface name
-interface GigabitEthernet3
+! PIM is also required on the LAN (multicast source) interface
+! (rt51: LAN is Gi4 with 172.20.51.1 already configured - only PIM is added)
+interface GigabitEthernet4
  description OnPrem-LAN
  ip address 172.20.51.1 255.255.255.0
  ip pim sparse-mode

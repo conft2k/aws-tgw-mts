@@ -1,0 +1,3 @@
+# local-only router configs (contain BGP passwords)
+onprem-*conf.txt
+*.secret

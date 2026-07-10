@@ -31,11 +31,18 @@ BGP:  C8000V(65200) Gi1 ↔ Route Server(65100) Endpoint, BFD 페일오버
 
 | 항목 | 값 | 비고 |
 |---|---|---|
-| C8000V-1 Gi1 / Gi2 | 10.1.1.10 / 10.1.1.40 | RS Peer-1 / mcast |
-| C8000V-2 Gi1 / Gi2 | 10.1.1.90 / 10.1.1.110 | RS Peer-2 / mcast |
-| Receiver-1 / -2 | 10.1.1.50 / 10.1.1.120 | AZ1 / AZ2 |
-| 온프렘 Lo0 (GRE 소스) | 192.168.255.1/32 | RouterRouteTable에서 TGW로 라우팅 |
-| 온프렘 / DXGW / RS / C8000V / TGW ASN | 65000 / 65300 / 65100 / 65200 / 65400 | DXGW≠TGW 필수 |
+| C8000V-1 Gi1 | 10.1.1.10 | RS Peer-1 (AZ1), `Router1PeerAddress` |
+| C8000V-1 Gi2 | 10.1.1.40 | 멀티캐스트 인터페이스 (AZ1), `Router1Gi2Address` |
+| C8000V-2 Gi1 | 10.1.1.90 | RS Peer-2 (AZ2), `Router2PeerAddress` |
+| C8000V-2 Gi2 | 10.1.1.110 | 멀티캐스트 인터페이스 (AZ2), `Router2Gi2Address` |
+| Receiver-1 | 10.1.1.50 | AZ1, `Receiver1Address` |
+| Receiver-2 | 10.1.1.120 | AZ2, `Receiver2Address` |
+| 온프렘 Lo0 (GRE 소스) | 192.168.255.1/32 | RouterRouteTable에서 TGW로 라우팅, `OnPremGreSourceCidr` |
+| 온프렘 라우터 ASN | 65000 | 온프렘 장비에서 설정 |
+| Route Server ASN | 65100 | `RouteServerAsn` |
+| C8000V ASN | 65200 | `RouterBgpAsn` |
+| DXGW ASN | 65300 | 별도 생성 시 지정, TGW ASN과 달라야 함 |
+| TGW ASN | 65400 | `TgwAsn` |
 
 RS Endpoint ENI IP, TGW 어태치먼트 ENI IP는 자동 할당 — 스택 Outputs 확인.
 

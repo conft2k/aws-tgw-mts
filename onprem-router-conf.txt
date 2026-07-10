@@ -1,0 +1,79 @@
+! onprem router 추가 설정 (기존 DX Transit VIF 설정 위에 merge)
+! 기존 유지: Gi1.351(169.254.96.54/29, peer .49), Gi2.451(169.254.96.62/29, peer .57)
+!
+ip multicast-routing distributed
+!
+interface Loopback0
+ description RP + GRE-Source
+ ip address 192.168.255.1 255.255.255.255
+ ip pim sparse-mode
+!
+! LAN(멀티캐스트 소스) 인터페이스에도 PIM 필요 — 실제 인터페이스명으로 교체
+interface GigabitEthernet3
+ description OnPrem-LAN
+ ip address 172.20.51.1 255.255.255.0
+ ip pim sparse-mode
+!
+interface Tunnel100
+ description GRE-to-C8000V-1-Primary
+ ip address 172.16.100.1 255.255.255.252
+ ip pim sparse-mode
+ tunnel source Loopback0
+ tunnel destination 10.1.1.10
+ ip mtu 1476
+ ip tcp adjust-mss 1436
+!
+interface Tunnel101
+ description GRE-to-C8000V-2-Secondary
+ ip address 172.16.101.1 255.255.255.252
+ ip pim sparse-mode
+ tunnel source Loopback0
+ tunnel destination 10.1.1.90
+ ip mtu 1476
+ ip tcp adjust-mss 1436
+!
+ip pim rp-address 192.168.255.1
+!
+ip prefix-list LOOPBACK-ONLY seq 5 permit 192.168.255.1/32
+ip prefix-list ONPREM-LAN seq 5 permit 172.20.51.0/24
+!
+! 터널 너머에서 VPC 언더레이 대역을 배우면 GRE 목적지가 터널로 재귀(recursive
+! routing)해 터널이 죽는다 — 오버레이 인바운드에서 10.1.1.0/24 차단
+ip prefix-list TUNNEL-IN seq 5 deny 10.1.1.0/24 le 32
+ip prefix-list TUNNEL-IN seq 10 permit 0.0.0.0/0 le 32
+!
+router bgp 65000
+ bgp log-neighbor-changes
+
+ ! 언더레이: DXGW Transit VIF 피어 (기존 설정 유지 + Lo0만 광고하도록 필터 추가)
+ ! 주의: LOOPBACK-ONLY out을 걸면 기존에 광고하던 172.20.51.0/24가 DX로
+ ! 더 이상 나가지 않음 — LAN 유니캐스트는 오버레이(GRE) 경유로 전환됨
+ neighbor 169.254.96.49 remote-as 65300
+ neighbor 169.254.96.49 password <VLAN351-BGP-KEY>
+ neighbor 169.254.96.49 fall-over bfd
+ neighbor 169.254.96.57 remote-as 65300
+ neighbor 169.254.96.57 password <VLAN451-BGP-KEY>
+ neighbor 169.254.96.57 fall-over bfd
+
+ ! 오버레이: C8000V 터널 피어 (C8000V ASN = 65200, RouterBgpAsn)
+ neighbor 172.16.100.2 remote-as 65200
+ neighbor 172.16.101.2 remote-as 65200
+
+ address-family ipv4
+  network 192.168.255.1 mask 255.255.255.255
+  network 172.20.51.0 mask 255.255.255.0
+
+  ! 언더레이에는 GRE 소스(Lo0)만 광고
+  neighbor 169.254.96.49 activate
+  neighbor 169.254.96.49 prefix-list LOOPBACK-ONLY out
+  neighbor 169.254.96.57 activate
+  neighbor 169.254.96.57 prefix-list LOOPBACK-ONLY out
+
+  ! 오버레이에는 LAN 대역만 광고, VPC 언더레이 대역 수신 차단
+  neighbor 172.16.100.2 activate
+  neighbor 172.16.100.2 prefix-list ONPREM-LAN out
+  neighbor 172.16.100.2 prefix-list TUNNEL-IN in
+  neighbor 172.16.101.2 activate
+  neighbor 172.16.101.2 prefix-list ONPREM-LAN out
+  neighbor 172.16.101.2 prefix-list TUNNEL-IN in
+ exit-address-family

@@ -139,6 +139,12 @@ aws ec2 search-transit-gateway-multicast-groups --region ap-northeast-2 \
 aws ec2-instance-connect ssh --instance-id <ReceiverInstance1Id> \
   --connection-type eice --region ap-northeast-2
 
+# (필수) IGMPv2 강제 — TGW는 IGMPv2 리포트만 인식하는데 리눅스 기본은
+# IGMPv3이라 조인이 TGW 도메인에 등록되지 않음. /proc/net/igmp 에서
+# ens5가 V2인지 확인 (부팅 후에도 유지하려면 /etc/sysctl.d 에 저장)
+sudo sysctl -w net.ipv4.conf.all.force_igmp_version=2 \
+  net.ipv4.conf.ens5.force_igmp_version=2
+
 # 리시버에서 그룹 조인 + 수신 (예: 239.1.1.1:5000)
 python3 - <<'EOF'
 import socket, struct
@@ -166,5 +172,7 @@ EOF
   서브넷은 같은 AZ 어태치먼트 덕분에 라우트 테이블 경유로 TGW에 도달합니다.
 - 멀티캐스트는 DX/VPN/피어링 위로 직접 지원되지 않음 → GRE로 우회하는 설계.
 - TGW가 IGMP 쿼리어(proto 2, src 0.0.0.0/32) — 리시버 SG에 이미 허용됨.
+- TGW는 IGMPv2만 지원 — 리시버(리눅스)는 `force_igmp_version=2` 필수
+  (기본 IGMPv3 리포트는 무시되어 그룹 멤버로 등록되지 않음).
 - EICE는 AZ1 1개로 전 AZ 접속(cross-AZ라 `PreserveClientIp=false`).
 - 2-byte ASN 사용, DXGW ASN은 TGW(65400)와 달라야 함.

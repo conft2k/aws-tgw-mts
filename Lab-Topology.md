@@ -35,7 +35,7 @@ flowchart TB
     TGWRT ==>|"att ENI 인입"| TGWRTB
     TGWRTB ==>|"GRE 종단<br/>애니캐스트 10.255.255.1"| C1
     TGWRTB -.->|"페일오버 시 재앵커"| C2
-    C1 ==>|"Gi2 송출"| TGW
+    C1 ==>|"활성 라우터만 Gi2 송출<br/>(static-group이 OIL에 Gi2 유지)"| TGW
     TGW ==>|"도메인 연결 서브넷으로 복제<br/>(IGMPv2 조인 멤버 ENI 수신)"| RSUB1
     TGW ==>|"도메인 연결 서브넷으로 복제<br/>(IGMPv2 조인 멤버 ENI 수신)"| RSUB2
     C1 -.->|"PIM Join · 오버레이 BGP<br/>(GRE 상행)"| RRTB

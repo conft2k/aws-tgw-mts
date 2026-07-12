@@ -1,6 +1,6 @@
-# Multicast GRE Anchor Redundancy with Amazon VPC Route Server
+# Zero-Downtime Hybrid Multicast Architecture for MTS Services
 
-**GRE anycast anchor × TGW multicast domain × VPC Route Server (BGP+BFD) — a hybrid multicast architecture verified by live measurement**
+**Amazon VPC Route Server (BGP+BFD) detects GRE anycast anchor failure in under a second and switches VPC routing, while the AWS Transit Gateway multicast domain (IGMPv2) replicates and delivers on-premises multicast to AWS receivers — a design whose lossless failover is verified by live measurement**
 
 > 한국어 문서: [README.md](README.md)
 

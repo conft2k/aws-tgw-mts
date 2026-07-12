@@ -1,6 +1,6 @@
-# Amazon VPC Route Server 기반 멀티캐스트 GRE 앵커 이중화
+# MTS 서비스를 위한 무중단 하이브리드 멀티캐스트 아키텍처
 
-**GRE 애니캐스트 앵커 × TGW 멀티캐스트 도메인 × VPC Route Server(BGP+BFD) — 실측으로 검증한 하이브리드 멀티캐스트 아키텍처**
+**Amazon VPC Route Server(BGP+BFD)가 GRE 애니캐스트 앵커의 장애를 1초 미만에 감지해 VPC 라우팅을 전환하고, AWS Transit Gateway 멀티캐스트 도메인(IGMPv2)이 온프레미스 멀티캐스트를 AWS 리시버들에게 복제·배포하는 — 실측으로 페일오버 무손실을 검증한 설계**
 
 > English version: [README.en.md](README.en.md)
 

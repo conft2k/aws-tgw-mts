@@ -4,19 +4,11 @@
 
 > 한국어 문서: [README.md](README.md)
 
-This hybrid design carries on-premises multicast traffic to AWS receivers in
-three steps. The on-premises router (CGW) sends multicast through a **GRE
-tunnel** to a router (C8000V) inside the VPC; that router emits the traffic
-into the **TGW multicast domain (IGMPv2)**; and the domain replicates it to
-every joined receiver.
-
-High availability hinges on **anycast**. The two VPC routers share one tunnel
-endpoint address (a shared loopback), and **VPC Route Server** decides which
-of them actually receives the tunnel. When the active router dies, Route
-Server detects it via BFD in under a second and repoints the VPC route to the
-standby (priority expressed with AS-path prepend); the tunnel simply
-re-attaches to the standby at the same address. The on-premises CGW **changes
-nothing** — its tunnel destination never moves.
+This is the record of a hybrid design that carries on-premises multicast to
+AWS receivers without interruption — actually deployed in the Seoul region
+and verified through repeated failure testing. The document runs in order:
+background and design rationale → setup procedure → verification → measured
+failover results → troubleshooting.
 
 ## Background
 
@@ -92,6 +84,21 @@ many receiving services in the cloud without interruption.
 For the same reasons, it generalizes to workloads combining "unidirectional
 multicast + untouchable source + cloud-side receiver scaling," such as
 broadcast contribution feeds and telemetry/monitoring distribution.
+
+### Architecture overview
+
+The traffic path has three steps. The on-premises router (CGW) sends
+multicast through a **GRE tunnel** to a router (C8000V) inside the VPC; that
+router emits the traffic into the **TGW multicast domain (IGMPv2)**; and the
+domain replicates it to every joined receiver.
+
+High availability hinges on **anycast**. The two VPC routers share one tunnel
+endpoint address (a shared loopback), and **VPC Route Server** decides which
+of them actually receives the tunnel. When the active router dies, Route
+Server detects it via BFD in under a second and repoints the VPC route to the
+standby (priority expressed with AS-path prepend); the tunnel simply
+re-attaches to the standby at the same address. The on-premises CGW **changes
+nothing** — its tunnel destination never moves.
 
 ```
 Multicast server 172.20.51.x

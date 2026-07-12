@@ -225,8 +225,10 @@ sudo systemd-run --unit=mcast-anchor --property=Restart=always \
   socat -u UDP4-RECVFROM:5001,ip-add-membership=239.1.1.1:0.0.0.0,fork STDOUT
 ```
 
-- 패키지 설치(socat/iperf3)는 S3 게이트웨이 엔드포인트 경유라 인터넷 불필요.
-- **iperf3는 멀티캐스트 미지원** — 수신 테스트는 socat/ping을 사용하세요.
+- 패키지 설치(socat 등)는 S3 게이트웨이 엔드포인트를 경유하므로 인터넷 연결이 없어도 됩니다.
+- 조인 앵커는 위의 socat 또는 [receiver-setup.txt](receiver-setup.txt)의 mcast-recv.py 중
+  하나면 됩니다 (둘 다 그룹 조인을 유지하는 역할).
+- **iperf3는 멀티캐스트를 지원하지 않습니다** — 스트림 테스트는 온프렘에서 iperf2로 보냅니다(3.5 참조).
 - 접속: 키페어 없이 `aws ec2-instance-connect ssh --instance-id <id> --connection-type eice`
 
 ---

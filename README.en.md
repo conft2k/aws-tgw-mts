@@ -257,9 +257,13 @@ sudo systemd-run --unit=mcast-anchor --property=Restart=always \
   socat -u UDP4-RECVFROM:5001,ip-add-membership=239.1.1.1:0.0.0.0,fork STDOUT
 ```
 
-- Package installs (socat/iperf) go through the S3 gateway endpoint — no
+- Package installs (socat etc.) go through the S3 gateway endpoint — no
   internet access needed.
-- **iperf3 does not support multicast** — use socat/ping for receive tests.
+- Either the socat unit above or mcast-recv.py from
+  [receiver-setup.txt](receiver-setup.txt) works as the join anchor (both
+  keep the group membership alive).
+- **iperf3 does not support multicast** — send stream tests from on-prem
+  with iperf2 (see 3.5).
 - Access: no key pair needed —
   `aws ec2-instance-connect ssh --instance-id <id> --connection-type eice`
 

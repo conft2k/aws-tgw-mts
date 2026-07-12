@@ -6,28 +6,36 @@ AWS 리시버까지 전달하는 하이브리드 멀티캐스트 HA 구성입니
 전환하는 방식으로, 온프레미스(CGW)는 아무 변경 없이 페일오버됩니다.
 
 ```
-멀티캐스트 서버 172.20.51.x ─ Gi4(PIM) ─ CGW (ASN 65000, Lo0 172.20.255.1 = GRE소스+RP)
-        │  DX Transit VIF ×2 (BGP 65000↔65300, BFD)   ← 언더레이: Lo0만 광고
-        ▼
-   DXGW (ASN 65300) ─── TGW (ASN 65400, Multicast) ═══ TGW Multicast Domain (IGMPv2)
-                 │ attachment = tgw-sub-az1/2 (전용)      ║ domain = receiver-sub
-┌─ VPC 10.1.1.0/24 ─────────────────────────────────────║─────────────────────┐
-│ [tgw-sub .224/27]  tgw-rtb: 10.255.255.1/32 → 활성 Gi1 ◀━ Route Server(65100)
-│                                                       ║      주입/전환(BFD)
-│ [router-sub .0/26]                                    ║
-│   C8000V-1 Gi1 .30 ── RS엔드포인트 .29  (BGP+BFD, prepend 없음 → 활성)
-│   C8000V-2 Gi1 .40 ── RS엔드포인트 .41  (BGP+BFD, prepend ×3 → 대기)
-│      = GRE Tunnel100 종단 (공유 Lo0 10.255.255.1 / 오버레이 172.16.100.2)
-│        오버레이 eBGP(65000↔65200)+PIM ↔ CGW, LAN 학습→RS 재광고
-│                                                       ║
-│ [receiver-sub .64/26]                                 ║
-│   C8000V Gi2 .90/.100 (igmp static-group) ─ 멀티캐스트 방출 ═▶ TGW 도메인이
-│   Receiver-1 (az1) ◀═══════════════════════════════════ 멤버에게 복제 배포
-│   Receiver-2 (az2) ◀═══  (IGMPv2 조인 = 멤버십)
-└──────────────────────────────────────────────────────────────────────────────┘
+멀티캐스트 서버 172.20.51.x
+  │ Gi4 (PIM)
+  ▼
+CGW (ASN 65000, Lo0 172.20.255.1 = GRE 소스 + PIM RP)
+  │
+  │ DX Transit VIF ×2 ── 언더레이 BGP 65000↔65300 + BFD, Lo0만 광고
+  ▼
+DXGW (ASN 65300)
+  │
+  ▼
+TGW (ASN 65400) ── attachment: tgw-sub-az1/2 (전용)
+  │                멀티캐스트 도메인(IGMPv2): receiver-sub 연결
+  ▼
+VPC 10.1.1.0/24
+  ├─ [tgw-sub .224/27]
+  │    tgw-rtb: 10.255.255.1/32 → 활성 라우터 Gi1 (Route Server가 주입)
+  │
+  ├─ [router-sub .0/26]
+  │    C8000V-1 Gi1 .30 ↔ RS 엔드포인트 .29 (prepend 없음 → 활성)
+  │    C8000V-2 Gi1 .40 ↔ RS 엔드포인트 .41 (prepend ×3 → 대기)
+  │    두 대가 GRE Tunnel100 종단 (공유 애니캐스트 Lo0 10.255.255.1, 오버레이 172.16.100.2)
+  │    오버레이 eBGP(65000↔65200) + PIM ↔ CGW, LAN 172.20.51.0/24 학습 → RS에 재광고
+  │    Route Server(ASN 65100)가 BGP+BFD로 활성 라우터의 Gi1 ENI 경로 주입/전환
+  │
+  └─ [receiver-sub .64/26]
+       C8000V Gi2 .90/.100 (igmp static-group) → TGW 멀티캐스트 도메인으로 방출
+       도메인이 IGMPv2 조인 멤버에게 복제 → Receiver-1 (az1), Receiver-2 (az2)
 
 데이터 경로: 서버 → CGW(RP) → GRE → 활성 C8000V → Gi2 → TGW 도메인 → Receiver ×2
-페일오버:   RS가 BFD 감지 → tgw-rtb/receiver-rtb 넥스트홉 교체 → CGW 무변경 재앵커
+페일오버:    RS가 BFD 감지 → tgw-rtb/receiver-rtb 넥스트홉 교체 → CGW 무변경 재앵커
 ```
 
 ---

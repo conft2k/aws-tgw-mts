@@ -309,6 +309,32 @@ sudo systemd-run --unit=mcast-anchor --property=Restart=always \
 | GRE overlay | CGW 65000 (172.16.100.1) | Active C8000V 65200 (172.16.100.2 shared) | BFD 500ms×3, hold 3/9 | Carries LAN (172.20.51.0/24) to AWS. Standby's session stays down (anycast property) |
 | TGW | TGW 65400 | DXGW 65300 | — | DXGW association (allowed-prefix advertisement) |
 
+### 2.4 Timer design — covering both graceful shutdown and sudden death
+
+The reboot in the failover measurements (4.1) is a "polite" failure: IOS-XE
+closes BGP gracefully before going down. Sudden death — kernel panic,
+hypervisor failure, forced instance termination — gives no such signal, and
+detection falls to the BFD/BGP timers below.
+
+| Timer | Value | Detection time | What it covers |
+|---|---|---|---|
+| RS BFD (Gi1) | 300ms × 3 | ~0.9s | **Active router sudden death** — the key timer that makes the RS withdraw routes and trigger failover |
+| Overlay BFD (Tu100) | 500ms × 3 | ~1.5s | Lets the CGW tear down the overlay session to a dead router before hold-time — speeds up return-path switchover |
+| Overlay BGP hold (CGW, `timers 3 9`) | keepalive 3s / hold 9s | ≤9s | Failback safety net — with anycast, BFD can be fooled by the surviving router answering, so the stale session is cleaned up by hold-time |
+| BGP `timers connect 5` (C8000V) | 5s | — | Shortens the retry interval for the new overlay session right after switchover (removes the default 30s wait) |
+| RS Persist Routes | 2 min | — | Keeps last routes on peer flap — prevents a transient flap from becoming a blackhole |
+
+- **Expectation for sudden death**: RS BFD detection (0.9s) + route swap ≈
+  **~1s forward outage** (for unidirectional streams). The return path takes
+  a few more seconds until the standby's overlay BGP establishes (comparable
+  to the measured 9.2s in the reboot test).
+- **For graceful shutdown**: the BGP notification arrives before BFD expiry,
+  so make-before-break holds — measured lossless (4.1 unidirectional).
+- **Why not tighter**: tightening BFD to e.g. 100ms×3 speeds detection but
+  makes the overlay BFD — which crosses DX — sensitive to path jitter and
+  prone to false flaps. The asymmetry of 300ms on the directly-attached
+  segment (Gi1) and 500ms on the tunnel is the balance point.
+
 ---
 
 ## 3. Verification guide
@@ -396,9 +422,9 @@ iperf -c 239.1.1.1 -u -T 8 -t 600 -i 1 -b 1M -l 1200
 ```
 
 - `-T 8`: TTL required (default 1 dies at the CGW)
-- `-l 1200`: **datagram size required** — the default 1470B exceeds the path
-  MTU once GRE overhead is added and is silently lost in its entirety (see
-  5.2). 1200B leaves headroom at 1252B including GRE
+- `-l 1200`: **datagram size required** — the default 1470B exceeds the
+  tunnel MTU (1476) and is silently lost in its entirety (see 5.2). 1200B
+  leaves headroom at 1228B including UDP/IP
 - `-b 1M -l 1200` = ~109 packets/s → loss-measurement resolution ~9ms
 
 Per-checkpoint verification (measured 2026-07-12):
@@ -563,7 +589,7 @@ What to watch:
 | (*,G) only, empty OIL | `show ip mroute` | C8000V's PIM Join not arriving — check tunnel/overlay state |
 | `%IGMP-3-QUERY_INT_MISMATCH ... 0.0.0.0` | — | Proxy query from a LAN snooping switch. Harmless (no effect on querier election) |
 | Overlay BGP flap | `show ip bgp neighbors 172.16.100.2` | hold 3/9 is intentional. If it flaps repeatedly, check DX path quality |
-| **Large UDP silently lost, ping passes** | C8000V `show ip mroute <grp> count` — source counter 0 | **GRE MTU overrun** (measured: iperf's default 1470B is lost entirely, 1200B passes). If payload + IP/UDP 28B + GRE 24B exceeds the 1500 path MTU, packets are dropped in the underlay — keep multicast app payloads **≤1400B** (iperf: `-l 1200`) |
+| **Large UDP silently lost, ping passes** | C8000V `show ip mroute <grp> count` — source counter 0 | **Tunnel MTU (1476) overrun** (measured: iperf's default 1470B is lost entirely — it never even reaches the C8000V; 1200B passes). If payload + UDP/IP 28B exceeds 1476, DF-set packets are dropped at the CGW tunnel ingress, and even fragments that make it through are dropped by TGW (fragmented multicast is unsupported, per official docs) — keep multicast app payloads **≤1400B** (iperf: `-l 1200`) |
 
 ### 5.3 AWS / receivers
 

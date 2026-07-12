@@ -244,7 +244,8 @@ Resources:
       Tags:
         - { Key: Name, Value: !Sub '${ProjectName}-receiver-sub-az2' }
 
-  # Dedicated TGW attachment subnets (one per AZ, attachment ENIs only)
+  # Dedicated TGW attachment subnets (one per AZ; attachment ENIs plus the
+  # EICE defined below - see the EicEndpoint comment)
   TgwSubnet1:
     Type: AWS::EC2::Subnet
     Properties:

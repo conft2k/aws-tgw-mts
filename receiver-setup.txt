@@ -38,14 +38,21 @@ cat /proc/net/igmp          # V2 column for the group entry, no V3 reports
 tail -f /home/ec2-user/mcast-recv.log
 
 # --- 4. Verify on AWS (from the workstation) ----------------------------------
-# Receiver ENIs should appear as members within ~2 min (TGW IGMP query cycle):
+# Receiver ENIs should appear as members within ~2 min (TGW IGMP query cycle).
+# Get the multicast domain ID from the stack output (or the console):
+MDOM=$(aws cloudformation describe-stacks --stack-name mcast-base \
+  --query 'Stacks[0].Outputs[?OutputKey==`MulticastDomainId`].OutputValue' --output text)
 aws ec2 search-transit-gateway-multicast-groups \
-  --transit-gateway-multicast-domain-id tgw-mcast-domain-0acc2ada9722a46f1 \
+  --transit-gateway-multicast-domain-id "$MDOM" \
   --query 'MulticastGroups[].{Group:GroupIpAddress,Eni:NetworkInterfaceId,Member:GroupMember}' --output table
 
 # --- 5. End-to-end: start the multicast server on-prem (Gi4 LAN) --------------
-# e.g. iperf/ffmpeg/socat sending UDP to 239.1.1.1:5001 with TTL >= 8
+# e.g. iperf2/ffmpeg/socat sending UDP to 239.1.1.1:5001 with TTL >= 8
 # (TTL must survive: server -> CGW -> GRE -> C8000V -> TGW -> receiver)
+# iperf2 only (iperf3 has no multicast). Keep payload <= 1400B - larger
+# datagrams (e.g. iperf's default 1470B) exceed the GRE tunnel MTU (1476)
+# and vanish silently. See README 3.5/5.2. Working example:
+#   iperf -c 239.1.1.1 -u -T 8 -t 600 -i 1 -b 1M -l 1200
 # then on CGW:      show ip mroute 239.1.1.1   -> (S,G) with Tunnel100 in OIL
 # on C8000V-1:      show ip mroute 239.1.1.1   -> (S,G), OIL Gi2
 # on the receiver:  tail mcast-recv.log        -> packets arriving

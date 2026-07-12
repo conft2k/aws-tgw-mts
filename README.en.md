@@ -6,9 +6,19 @@
 
 This is the record of a hybrid design that carries on-premises multicast to
 AWS receivers without interruption — actually deployed in the Seoul region
-and verified through repeated failure testing. The document runs in order:
-background and design rationale → setup procedure → verification → measured
-failover results → troubleshooting.
+and verified through repeated failure testing.
+
+**Contents**
+
+- [Background](#background) — the problem, the value of Route Server, where it fits, architecture overview
+- [GRE overlay bring-up flow](#gre-overlay-bring-up-flow)
+- [1. Setup order](#1-setup-order)
+- [2. CloudFormation resources](#2-cloudformation-resources)
+- [3. Verification guide](#3-verification-guide)
+- [4. Failover tests](#4-failover-tests) — measured results
+- [5. Monitoring and troubleshooting](#5-monitoring-and-troubleshooting)
+- [Appendix. Router status sample outputs](#appendix-router-status-sample-outputs-measured)
+- [References (official AWS documentation)](#references-official-aws-documentation)
 
 ## Background
 

@@ -233,8 +233,8 @@ aws cloudformation create-stack --stack-name mcast-base \
 - **터널은 1개**(Tunnel100 → 10.255.255.1). 페일오버는 AWS 쪽에서 일어나므로 CGW는 무변경.
 - 광고 필터: DX(언더레이)에는 `LOOPBACK-ONLY`(Lo0만), 터널(오버레이)에는 `ONPREM-LAN`(LAN만).
   LAN 유니캐스트는 오버레이로만 흐릅니다.
-- `TUNNEL-IN`이 VPC CIDR과 애니캐스트 /32의 터널 유입을 차단 — GRE 재귀 라우팅(터널 목적지가
-  터널을 가리키는 순환) 방지.
+- `TUNNEL-IN`이 VPC CIDR과 애니캐스트 /32의 터널 유입을 차단해 GRE 재귀
+  라우팅(터널 목적지가 터널을 가리키는 순환)을 막습니다.
 - 멀티캐스트 서버가 붙는 **Gi4에 `ip pim sparse-mode` 필수** (FHR 역할 — 없으면 소스가 RP에
   등록되지 않아 (S,G)가 생기지 않음).
 - 오버레이 BGP: `fall-over bfd` + `timers 3 9` (복귀 시 스테일 세션 정리 안전망).
@@ -370,7 +370,7 @@ aws ec2 describe-route-tables --filters "Name=tag:Name,Values=mcast-tgw-rtb"
 온프렘 멀티캐스트 서버에서:
 
 ```bash
-ping -t 8 239.1.1.1        # TTL 필수 (기본 1이면 첫 라우터에서 소멸)
+ping -t 8 239.1.1.1        # TTL 지정 필수 (기본값 1이면 첫 라우터에서 소멸)
 ```
 
 조인된 리시버들이 각자 유니캐스트로 응답합니다. 실제 출력(2026-07-12):
@@ -407,8 +407,8 @@ UDP 스트림으로 합니다. **iperf2만 멀티캐스트를 지원**합니다 
 iperf -c 239.1.1.1 -u -T 8 -t 600 -i 1 -b 1M -l 1200
 ```
 
-- `-T 8`: TTL 필수 (기본 1이면 CGW에서 소멸)
-- `-l 1200`: **데이터그램 크기 필수** — 기본 1470B는 터널 MTU(1476)를 넘어
+- `-T 8`: TTL 지정 필수 (기본값 1이면 CGW에서 소멸)
+- `-l 1200`: **데이터그램 크기 지정 필수** — 기본값 1470B는 터널 MTU(1476)를 넘어
   전량 소멸합니다 (7.2 참조). 1200B면 UDP/IP를 포함해도 1228B라 여유가 있습니다
 - `-b 1M -l 1200` = 초당 약 109패킷 → 손실 측정 해상도 ~9ms
 
@@ -421,7 +421,7 @@ show ip mroute 239.1.1.1 count
                                        ↑누적  ↑pps ↑평균B ↑kbps
 ```
 
-리시버에서 (iperf2 서버가 그룹을 조인하고 수신 — 설치·기동은 receiver-setup.txt):
+리시버에서는 iperf2 서버가 그룹 조인과 수신을 겸합니다 (설치·기동 절차는 receiver-setup.txt 참고):
 
 ```bash
 iperf -s -u -B 239.1.1.1 -p 5001 -i 1        # 초당 처리량/지터/손실 리포트
@@ -550,7 +550,7 @@ router bgp 65000
 |---|---|---|
 | RS BGP down | `show ip bgp summary`, RS 피어 상태(CLI) | SG(c8000v-sg)가 VPC 전체 허용인지, Gi1 ENI 연결 상태 |
 | (S,G) 없음 | `show ip mroute`, `show ip rpf 172.20.255.1` | RPF가 Tunnel100인지 (`ip mroute` 정적 항목 필수 — 언더레이엔 PIM 없음) |
-| 터널 up인데 트래픽 없음 | `show ip mroute 239.1.1.1 count` | 카운터 정지면 CGW 쪽 (S,G)/Register 확인 |
+| 터널 up인데 트래픽 없음 | `show ip mroute 239.1.1.1 count` | 카운터가 멈춰 있으면 CGW 쪽 (S,G)/Register 확인 |
 | 페일오버 후 로그 | `show logging \| include %BGP\|%BFD` | ADJCHANGE/BFD 이벤트 타임라인으로 전환 시각 분석 |
 | 접속 | EICE: `aws ec2-instance-connect ssh` 또는 SSH ProxyCommand `open-tunnel` | pem이 `error in libcrypto`면 base64 본문을 DER로 디코드 후 재생성 |
 
@@ -562,14 +562,14 @@ router bgp 65000
 | (S,G) 안 생김 | `show ip mroute 239.1.1.1`, `show ip pim interface` | **Gi4 PIM 누락**이 최다 원인. Tu0/Tu1(Register 터널) 존재 확인 |
 | (*,G)만 있고 OIL 비어있음 | `show ip mroute` | C8000V의 PIM Join 미도달 — 터널/오버레이 상태 확인 |
 | `%IGMP-3-QUERY_INT_MISMATCH ... 0.0.0.0` | — | LAN 스누핑 장비의 프록시 쿼리. 무해(쿼리어 선출에 영향 없음) |
-| 오버레이 BGP flap | `show ip bgp neighbors 172.16.100.2` | hold 3/9은 의도된 설정. 반복 플랩이면 DX 경로 품질 확인 |
+| 오버레이 BGP flap | `show ip bgp neighbors 172.16.100.2` | hold 3/9는 의도된 설정. 반복 플랩이면 DX 경로 품질 확인 |
 | **큰 UDP만 소멸, ping은 통과** | C8000V `show ip mroute <grp> count` — 소스 카운터 0 | **터널 MTU(1476) 초과** (실측: iperf 기본 1470B는 전량 소멸 — C8000V에 도달조차 안 함, 1200B는 통과). 페이로드+UDP/IP 28B가 1476을 넘으면 DF 설정된 패킷은 CGW 터널 인입에서 드롭되고, 단편화되어 넘어가더라도 TGW가 멀티캐스트 단편을 드롭(공식 문서) — 멀티캐스트 앱 페이로드는 **1400B 이하** 권장 (iperf는 `-l 1200`) |
 
 ### 7.3 AWS / 리시버 공통
 
 | 증상 | 확인 | 원인/조치 |
 |---|---|---|
-| TGW 그룹 멤버 0 | `search-transit-gateway-multicast-groups`, 리시버 `ip maddr show ens5`에 그룹 없음 | 리시버 조인 앵커(socat/iperf2 서버) 사망 → 재기동(systemd 권장). **인스턴스가 교체되면 스크립트째 사라지므로 재설정 필요** (receiver-setup.txt). IGMPv3로 조인 중인지(`force_igmp_version=2`) |
+| TGW 그룹 멤버 0 | `search-transit-gateway-multicast-groups`, 리시버 `ip maddr show ens5`에 그룹 없음 | 리시버 조인 앵커(socat/iperf2 서버)가 죽은 것 → 재기동(systemd 권장). **인스턴스가 교체되면 스크립트째 사라지므로 재설정 필요** (receiver-setup.txt). IGMPv3로 조인 중인지(`force_igmp_version=2`) |
 | 리시버가 응답 안 함 (ping) | 리시버 `tcpdump -ni ens5 icmp` | 패킷 도착 O + 응답 X → `icmp_echo_ignore_broadcasts=0`. 도착 X → 리시버 SG(ICMP/UDP 소스에 온프렘 대역), TGW 멤버십 |
 | RS 경로 미주입 | `get-route-server-routing-database` | in-rib인데 미설치면 해당 RTB의 propagation 활성 여부 |
 | 스택 업데이트 실패 (IP 충돌) | 변경 세트의 Replacement 컬럼 | 고정 IP 자원의 교체는 생성→삭제 순서라 충돌 — AMI 고정 유지, IP 변경은 재생성으로 |

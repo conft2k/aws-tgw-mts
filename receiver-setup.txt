@@ -1,14 +1,14 @@
 # ============================================================================
 # Multicast receiver setup (mcast-receiver-ec2-az1 / az2, AL2023)
 # Run the same steps on BOTH receivers:
-#   az1: i-0a42fa4759fcb10be (10.1.1.84)
-#   az2: i-0278c486485c145c5 (10.1.1.116)
+#   az1: <receiver-az1-id> (10.1.1.84)
+#   az2: <receiver-az2-id> (10.1.1.116)
 # ============================================================================
 
 # --- 0. Connect (EC2 Instance Connect Endpoint; instances have no key pair) --
 # From a machine with AWS CLI (region ap-northeast-2). The console
 # "EC2 Instance Connect" button also works.
-aws ec2-instance-connect ssh --instance-id i-0a42fa4759fcb10be --connection-type eice
+aws ec2-instance-connect ssh --instance-id <receiver-az1-id> --connection-type eice
 
 # --- 1. Force IGMPv2 (TGW multicast supports IGMPv2 only; AL2023 default v3) -
 sudo sysctl -w net.ipv4.conf.all.force_igmp_version=2
@@ -56,3 +56,35 @@ aws ec2 search-transit-gateway-multicast-groups \
 # then on CGW:      show ip mroute 239.1.1.1   -> (S,G) with Tunnel100 in OIL
 # on C8000V-1:      show ip mroute 239.1.1.1   -> (S,G), OIL Gi2
 # on the receiver:  tail mcast-recv.log        -> packets arriving
+
+# --- 6. (Optional) iperf2 on the receivers - use instead of mcast-recv.py -----
+# "sudo dnf install epel-release" does NOT work here for two reasons:
+#   (a) AL2023 has no EPEL support (no epel-release package in its repos)
+#   (b) this VPC has no IGW/NAT - instances cannot reach the internet at all
+# Install offline instead: download the EPEL9 rpm on the workstation and push
+# it through the EICE tunnel. Runtime deps are only glibc 2.34 / libstdc++ /
+# libgcc, all present in the AL2023 base image (RHEL9 and AL2023 share
+# glibc 2.34, so the el9 binary runs as-is).
+
+RPM=iperf-2.1.6-2.el9.x86_64.rpm
+curl -sO https://dl.fedoraproject.org/pub/epel/9/Everything/x86_64/Packages/i/$RPM
+
+ssh-keygen -q -t ed25519 -f /tmp/eice -N '' <<<y
+for i in <receiver-az1-id> <receiver-az2-id>; do
+  # temporary key is valid for 60s - send right before each connection
+  aws ec2-instance-connect send-ssh-public-key --instance-id $i \
+    --instance-os-user ec2-user --ssh-public-key file:///tmp/eice.pub
+  scp -i /tmp/eice -o StrictHostKeyChecking=no \
+    -o ProxyCommand="aws ec2-instance-connect open-tunnel --instance-id $i" \
+    $RPM ec2-user@$i:/tmp/
+  aws ec2-instance-connect send-ssh-public-key --instance-id $i \
+    --instance-os-user ec2-user --ssh-public-key file:///tmp/eice.pub
+  ssh -i /tmp/eice -o StrictHostKeyChecking=no \
+    -o ProxyCommand="aws ec2-instance-connect open-tunnel --instance-id $i" \
+    ec2-user@$i "sudo dnf install -y /tmp/$RPM && iperf --version"
+done
+
+# iperf2 receiver (joins the group itself; IGMPv2 sysctl from step 1 still
+# required, and stop mcast-recv.py first - both bind UDP :5001):
+#   pkill -f mcast-recv.py
+#   iperf -s -u -B 239.1.1.1 -p 5001 -i 1

@@ -57,6 +57,34 @@ by BGP, BFD, and prepend — protocol behaviors proven over 30 years. Being able
 to operate VPC routing with tools network engineers already know is what makes
 this design work.
 
+### Where it shines — MTS-style real-time market data distribution
+
+This architecture is especially effective for environments like **real-time
+market data distribution behind brokerage MTS/HTS platforms** (mobile/home
+trading systems), where an on-premises multicast feed must be extended to
+many receiving services in the cloud without interruption.
+
+- **The traffic pattern matches exactly** — exchange market data feeds are
+  **unidirectional UDP multicast streams**. The measured results of this
+  design (no receive gap across the entire failure-and-failback cycle; see
+  the unidirectional measurement in 4.1) apply to this pattern directly.
+- **The feed source cannot be touched** — market data reception lines and
+  equipment are hard to change for regulatory and contractual reasons. This
+  design's property that failover happens entirely on the AWS side, with the
+  on-premises CGW unchanged, fits that constraint as-is.
+- **Receivers scale in the cloud** — the services consuming quotes
+  (execution, order book, alerting) scale horizontally in AWS. With the TGW
+  domain, adding a receiver is just an IGMP join, and TGW carries the
+  replication load (router load unchanged).
+- **Answers trading-hours availability questions with data** — planned
+  switchover and failback are lossless, and even unplanned failure is bounded
+  by BFD detection (~1s). Operational questions like "can we replace a router
+  during market hours?" can be answered with measurements.
+
+For the same reasons, it generalizes to workloads combining "unidirectional
+multicast + untouchable source + cloud-side receiver scaling," such as
+broadcast contribution feeds and telemetry/monitoring distribution.
+
 ```
 Multicast server 172.20.51.x
   │ Gi4 (PIM)
@@ -708,3 +736,24 @@ establishes, it transitions to the same shape as the active router.
 If the two routers' outputs are reversed from this table, a failover has
 occurred — cross-check the currently active router via the RS routing
 database and the 10.255.255.1/32 next-hop ENI in `mcast-tgw-rtb`.
+
+---
+
+## References (official AWS documentation)
+
+**Amazon VPC Route Server**
+- [Dynamic routing in your VPC using VPC Route Server](https://docs.aws.amazon.com/vpc/latest/userguide/dynamic-routing-route-server.html)
+- [How Amazon VPC Route Server works](https://docs.aws.amazon.com/vpc/latest/userguide/route-server-how-it-works.html) — endpoint/peer/BFD/Persist Routes concepts
+
+**AWS Transit Gateway multicast**
+- [Multicast in AWS Transit Gateway](https://docs.aws.amazon.com/vpc/latest/tgw/tgw-multicast-overview.html) — basis for section 5: IGMPv2 query cycle (2 min), SG/NACL requirements (protocol 2, source 0.0.0.0/32), etc.
+- [Multicast domains](https://docs.aws.amazon.com/vpc/latest/tgw/multicast-domains-about.html)
+- [Transit Gateway quotas (incl. MTU)](https://docs.aws.amazon.com/vpc/latest/tgw/transit-gateway-quotas.html) — **fragmented multicast packets are dropped**: directly related to the GRE MTU trap in 5.2
+
+**AWS Direct Connect**
+- [Direct Connect gateways](https://docs.aws.amazon.com/directconnect/latest/UserGuide/direct-connect-gateways-intro.html)
+- [Transit gateway associations (Transit VIF)](https://docs.aws.amazon.com/directconnect/latest/UserGuide/direct-connect-transit-gateways.html)
+- [Allowed prefixes interactions](https://docs.aws.amazon.com/directconnect/latest/UserGuide/allowed-to-prefixes.html) — basis for manual step ② in 1.1
+
+**Miscellaneous**
+- [EC2 Instance Connect Endpoint](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/connect-with-ec2-instance-connect-endpoint.html) — key-pair-less SSH access to routers/receivers

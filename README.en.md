@@ -12,7 +12,7 @@ configuration changes**.
 
 ## Background
 
-### The problem: the hybrid multicast gap
+### The problem: two gaps in hybrid multicast
 
 When you try to extend multicast-dependent workloads — market data feeds,
 broadcast contribution, command-and-control systems — into AWS, you hit two gaps.
@@ -20,9 +20,9 @@ broadcast contribution, command-and-control systems — into AWS, you hit two ga
 1. **The AWS network does not natively forward multicast.** The TGW multicast
    domain is the only native mechanism, but it works only inside VPCs, and
    Direct Connect/VPN do not carry multicast, so there is no direct
-   interconnect with an on-premises PIM domain. → Solution: pull multicast
-   into an EC2 router (C8000V) inside the VPC over a **GRE tunnel**, and have
-   it emit into the TGW domain.
+   interconnect with an on-premises PIM domain. The way through is a
+   **GRE tunnel**: pull multicast to an EC2 router (C8000V) inside the VPC
+   and have it emit into the TGW domain.
 2. That instantly creates a new problem — **the EC2 router terminating GRE
    becomes a single point of failure**. Even with two routers, VPC route
    tables are static, so you need "something" that detects failure and
@@ -40,9 +40,9 @@ routing policy such as active/standby preference.
 ### The value of VPC Route Server — the heart of this design
 
 **Amazon VPC Route Server brings standard routing-protocol semantics to VPC
-route tables.** It peers eBGP with EC2 appliances and dynamically injects and
-withdraws the routes they advertise into VPC route tables. In this design,
-its value is:
+route tables.** It peers eBGP with EC2 appliances, dynamically injects the
+routes they advertise into VPC route tables, and withdraws them when a peer
+fails. In this design, its value is:
 
 | Value | What it means here | Measured |
 |---|---|---|
@@ -155,9 +155,10 @@ That final hop (the `/32` route in tgw-rtb) is the **key steering point of the
 anycast design** — both C8000Vs advertise the same Lo0 to the RS (standby with
 prepend), and the RS best-path decides this route's next-hop.
 
-**③ Tunnel establishment** — GRE is stateless; there is no negotiation. If
-both sides' source/destination are symmetric it comes up up/up. MTU 1476 /
-TCP MSS 1436 compensate for the 24B encapsulation overhead.
+**③ Tunnel establishment** — GRE is stateless; there is no negotiation. The
+tunnel shows up/up as soon as the two ends' source and destination mirror
+each other. MTU 1476 / TCP MSS 1436 compensate for the 24B encapsulation
+overhead.
 
 **④ Overlay control plane** — on the in-tunnel P2P (172.16.100.0/30):
 
@@ -474,9 +475,9 @@ Measured results (with BFD + timer tuning):
 | Item | Result | UDP multicast loss time |
 |---|---|---|
 | VPC route switchover | ~1s after BFD detection (effectively 0 on graceful stop — make-before-break) | **0s** (no receive gap during switchover) |
-| **Forward multicast loss** | **0 packets** (entire failure+failback window, 5,114 packets at 0.1s interval) — thanks to the pre-built (*,G) from Gi2 static-group | **0s** (reboot re-measurement: max gap 56ms across the entire window = jitter level) |
+| **Forward multicast loss** | **0 packets** (entire failure+failback window, 5,114 packets at 0.1s interval) — thanks to the pre-built (*,G) from Gi2 static-group | **0s** (reboot test: max gap 56ms across the entire window = jitter level) |
 | Return (reply) path switchover | ≤1s (overlay BFD + connect 5) | N/A (unidirectional streams need no return path) |
-| Failback return gap | ~90s — preemption right after boot fires before the overlay BGP is ready (structural limit). Treat failback as a planned operation | **0s** (lossless during failback too — reconfirmed by reboot re-measurement) |
+| Failback return gap | ~90s — preemption right after boot fires before the overlay BGP is ready (structural limit). Treat failback as a planned operation | **0s** (lossless during failback too — reconfirmed in the reboot test) |
 
 Recovery to the original state is automatic (preemption) — once C8000V-1
 boots, it becomes active again with no manual steps.

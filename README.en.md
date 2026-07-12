@@ -517,9 +517,43 @@ preemption restores the original state after boot.
 
 - The variance in route-swap latency at failover (+2s vs +18s) is just
   IOS-XE shutdown timing; neither cycle had any receive gap.
-- 600s stream totals (identical on both receivers): **0 switchover-related
-  losses out of 65,538 datagrams** (the single lost datagram occurred in the
-  first second of the stream — unrelated to the switchovers).
+- 600s stream totals (identical on both receivers): cycle-1 stream
+  1/65,538 (0.0015%, a single datagram in the first second — unrelated to
+  the switchovers), cycle-2 stream **0/65,538 (0%)**.
+
+#### Receiver log excerpts (verbatim, cycle-2 stream)
+
+Raw iperf2 server log from receiver az1. The switchover instants appear only
+as jitter spikes, with the `Lost/Total` column staying at zero throughout.
+
+Failover window — jitter blips from ~0.1ms to 0.95ms (zero loss):
+
+```
+[  2] 83.00-84.00 sec   128 KBytes  1.05 Mbits/sec   0.109 ms 0/109 (0%)
+[  2] 84.00-85.00 sec   129 KBytes  1.06 Mbits/sec   0.950 ms 0/110 (0%)   <- failover
+[  2] 85.00-86.00 sec   128 KBytes  1.05 Mbits/sec   0.153 ms 0/109 (0%)
+```
+
+Failback window — the preemption switch shows up as a few jitter spikes only
+(zero loss):
+
+```
+[  2] 350.00-351.00 sec   128 KBytes  1.05 Mbits/sec   0.745 ms 0/109 (0%)  <- failback begins
+[  2] 351.00-352.00 sec   128 KBytes  1.05 Mbits/sec   0.069 ms 0/109 (0%)
+[  2] 354.00-355.00 sec   128 KBytes  1.05 Mbits/sec   1.347 ms 0/109 (0%)
+[  2] 356.00-357.00 sec   128 KBytes  1.05 Mbits/sec   2.013 ms 0/109 (0%)  <- failback complete
+```
+
+Final 600s stream summary — zero loss across the entire window including
+both failover and failback:
+
+```
+[  2] 0.00-600.00 sec  75.0 MBytes  1.05 Mbits/sec   0.075 ms 0/65538 (0%)
+```
+
+Receiver az2 recorded the identical summary (`0/65538 (0%)`) — the TGW
+domain replicated the same stream to both AZs and neither copy lost a
+datagram.
 
 #### Key takeaways
 

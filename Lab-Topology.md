@@ -22,12 +22,12 @@ flowchart TB
         direction TB
         TGWRTB["tgw-rtb 조회 (RS 주입)<br/>10.255.255.1/32 → 활성 Gi1 ENI"]
         RRTB["router-rtb 조회 (정적)<br/>172.20.255.1/32 → TGW"]
-        subgraph AZ1["AZ1"]
-            C1["C8000V-1<br/>활성"]
+        C1["C8000V-1 · 활성<br/>Gi2 .90 = receiver-sub-az1"]
+        C2["C8000V-2 · 대기<br/>Gi2 .100 = receiver-sub-az2"]
+        subgraph RSUB1["receiver-sub-az1 10.1.1.64/27 (AZ1)<br/>멀티캐스트 도메인 연결"]
             R1["EC2-1 리시버<br/>10.1.1.84"]
         end
-        subgraph AZ2["AZ2"]
-            C2["C8000V-2<br/>대기"]
+        subgraph RSUB2["receiver-sub-az2 10.1.1.96/27 (AZ2)<br/>멀티캐스트 도메인 연결"]
             R2["EC2-2 리시버<br/>10.1.1.116"]
         end
     end
@@ -58,8 +58,11 @@ flowchart TB
 3. **router-rtb** (정적) — 역방향(PIM Join·오버레이 BGP가 GRE를 타고 CGW로
    올라갈 때) C8000V가 온프렘 Lo0로 가는 경로
 
-TGW 도메인 → 리시버 **복제 구간은 라우팅 테이블을 조회하지 않습니다** —
-도메인 멤버십(IGMPv2 조인)으로 대상이 결정됩니다. receiver-rtb는 단방향
+복제는 **멀티캐스트 도메인에 연결된 두 서브넷**(receiver-sub-az1
+`10.1.1.64/27`, receiver-sub-az2 `10.1.1.96/27`)으로만 일어납니다. 활성
+C8000V가 Gi2(.90, receiver-sub-az1 소속)로 송출하면 TGW 도메인이 IGMPv2
+조인 멤버가 있는 두 서브넷의 ENI로 복제합니다 — 이 구간은 **라우팅 테이블을
+조회하지 않고** 도메인 멤버십으로 대상이 결정됩니다. receiver-rtb는 단방향
 스트림에는 등장하지 않는 유니캐스트 리턴 경로라 2번 그림에 있습니다.
 
 ## 2. 컨트롤 플레인 — Route Server 페일오버

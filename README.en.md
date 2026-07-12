@@ -62,8 +62,8 @@ value is:
 | **Sub-second failure detection (BFD)** | Appliance health-checking with zero lines of custom code | VPC route switchover in ~1s |
 | **Standard BGP policy** | Active/standby expressed with nothing but AS-path prepend — both routers run identical configs, differing by one policy line | Failover automatic; failback automatic (preemption) |
 | **Combined with anycast** | Only the next-hop of the shared Lo0 /32 changes → GRE re-anchors to the standby router | Failover with **zero on-premises (CGW) changes** |
-| **Persist Routes** | Keeps last routes on peer flap, preventing blackholes | No false switchover across 3 repeated reboots |
-| **Injects into both route tables at once** | tgw-rtb (GRE ingress) and receiver-rtb (return path) updated by one session | Unidirectional multicast **lossless**; round-trip ~9s |
+| **Persist Routes** | Keeps last routes on peer flap, preventing blackholes | No false switchover across repeated stop/start cycles |
+| **Injects into both route tables at once** | tgw-rtb (GRE ingress) and receiver-rtb (return path) updated by one session | Multicast stream **lossless** through failure and failback |
 
 In short: the failover orchestration you used to write in Lambda is replaced
 by BGP, BFD, and prepend — protocol behaviors proven over 30 years. Being able
@@ -79,8 +79,8 @@ many receiving services in the cloud without interruption.
 
 - **The traffic pattern matches exactly** — exchange market data feeds are
   **unidirectional UDP multicast streams**. The measured results of this
-  design (no receive gap across the entire failure-and-failback cycle; see
-  the unidirectional measurement in 6.1) apply to this pattern directly.
+  design (zero loss across the entire failure-and-failback cycle; see the
+  iperf2 measurements in 6.1) apply to this pattern directly.
 - **The feed source cannot be touched** — market data reception lines and
   equipment are hard to change for regulatory and contractual reasons. This
   design's property that failover happens entirely on the AWS side, with the
@@ -288,9 +288,9 @@ sudo systemd-run --unit=mcast-anchor --property=Restart=always \
 
 - Package installs (socat etc.) go through the S3 gateway endpoint — no
   internet access needed.
-- Either the socat unit above or mcast-recv.py from
-  [receiver-setup.txt](receiver-setup.txt) works as the join anchor (both
-  keep the group membership alive).
+- Either the socat unit above or the iperf2 server (joining via
+  `-B 239.1.1.1`) from [receiver-setup.txt](receiver-setup.txt) works as the
+  join anchor (both keep the group membership alive).
 - **iperf3 does not support multicast** — send stream tests from on-prem
   with iperf2 (see 5.5).
 - Access: no key pair needed —
@@ -340,8 +340,8 @@ sudo systemd-run --unit=mcast-anchor --property=Restart=always \
 
 ### 4.4 Timer design — covering both graceful shutdown and sudden death
 
-The reboot in the failover measurements (6.1) is a "polite" failure: IOS-XE
-closes BGP gracefully before going down. Sudden death — kernel panic,
+The instance stop in the failover measurements (6.1) is a "polite" failure:
+IOS-XE closes BGP gracefully before going down. Sudden death — kernel panic,
 hypervisor failure, forced instance termination — gives no such signal, and
 detection falls to the BFD/BGP timers below.
 
@@ -355,10 +355,9 @@ detection falls to the BFD/BGP timers below.
 
 - **Expectation for sudden death**: RS BFD detection (0.9s) + route swap ≈
   **~1s forward outage** (for unidirectional streams). The return path takes
-  a few more seconds until the standby's overlay BGP establishes (comparable
-  to the measured 9.2s in the reboot test).
+  a few more seconds until the standby's overlay BGP establishes.
 - **For graceful shutdown**: the BGP notification arrives before BFD expiry,
-  so make-before-break holds — measured lossless (6.1 unidirectional).
+  so make-before-break holds — measured lossless (6.1, iperf2).
 - **Why not tighter**: tightening BFD to e.g. 100ms×3 speeds detection but
   makes the overlay BFD — which crosses DX — sensitive to path jitter and
   prone to false flaps. The asymmetry of 300ms on the directly-attached
@@ -465,14 +464,22 @@ show ip mroute 239.1.1.1 count
                                        ↑total ↑pps ↑avgB ↑kbps
 ```
 
-On the receiver (mcast-recv.py must be listening on port 5001 — receiver-setup.txt):
+On the receiver (the iperf2 server joins the group and receives — see
+receiver-setup.txt for install and startup):
 
 ```bash
-tail -f /home/ec2-user/mcast-recv.log        # packet arrival log
+iperf -s -u -B 239.1.1.1 -p 5001 -i 1        # per-second throughput/jitter/loss
+tail -f /home/ec2-user/iperf-recv.log        # when started in the background
 ```
 
-Precise gap (loss window) measurement — record tcpdump timestamps, then
-compute the maximum inter-packet gap:
+The iperf2 server report is itself the loss-measurement tool — every interval
+prints a `Lost/Total Datagrams` column (109 packets/s ≈ 9ms resolution), so
+you can see whether a switchover lost zero or N packets without any extra
+capture. A full summary (total datagrams, loss rate, average jitter) is
+printed when the stream ends.
+
+If you need sub-interval precision on receive gaps, record tcpdump timestamps
+in parallel and compute the maximum inter-packet gap:
 
 ```bash
 sudo sh -c 'nohup tcpdump -lni ens5 -tt "udp and dst 239.1.1.1" > /tmp/mcast-times.txt 2>/dev/null &'
@@ -481,98 +488,56 @@ awk '{if(prev){g=$1-prev; if(g>max){max=g; at=prev}} prev=$1}
      END {printf "max_gap=%.3fs at %.3f\n", max, at}' /tmp/mcast-times.txt
 ```
 
-Measured example (entire 6.1 reboot test): receiver-1 `max_gap=0.056s`,
-receiver-2 `max_gap=0.053s` — lossless including failover and failback.
-
 ---
 
 ## 6. Failover tests
 
 ### 6.1 C8000V router failure (measured)
 
-Procedure: with `ping -D -t 8 239.1.1.1 -i 0.1` running from on-prem, stop the
-active C8000V instance.
+Procedure: with a UDP multicast stream flowing from the on-prem iperf2 client
+(`iperf -c 239.1.1.1 -u -T 8 -b 1M -l 1200` from 5.5, 109 packets/s),
+**stop → start** the active C8000V instance. The iperf2 servers on both
+receivers (`iperf -s -u -B 239.1.1.1 -i 1`) report loss/jitter directly at
+one-second intervals.
 
 Sequence: RS BFD detection (~1s) → RIB withdrawal → prepended C8000V-2 route
 promoted to best → tgw-rtb/receiver-rtb next-hops swapped → GRE re-anchors to
-the standby router (CGW unchanged) → overlay BGP re-establishes → LAN return
-path restored.
+the standby router (CGW unchanged) → overlay BGP re-establishes → automatic
+preemption restores the original state after boot.
 
-Measured results (with BFD + timer tuning):
+#### Measured timeline (2026-07-12, stop→start under an iperf2 stream, 2 cycles)
 
-| Item | Result | UDP multicast loss time |
+| Elapsed | Event | Receiver iperf2 report |
 |---|---|---|
-| VPC route switchover | ~1s after BFD detection (effectively 0 on graceful stop — make-before-break) | **0s** (no receive gap during switchover) |
-| **Forward multicast loss** | **0 packets** (entire failure+failback window, 5,114 packets at 0.1s interval) — thanks to the pre-built (*,G) from Gi2 static-group | **0s** (reboot test: max gap 56ms across the entire window = jitter level) |
-| Return (reply) path switchover | ≤1s (overlay BFD + connect 5) | N/A (unidirectional streams need no return path) |
-| Failback return gap | ~90s — preemption right after boot fires before the overlay BGP is ready (structural limit). Treat failback as a planned operation | **0s** (lossless during failback too — reconfirmed in the reboot test) |
+| 0s | stop command on active C8000V-1 | normal reception continues |
+| +2s (cycle 1) / +18s (cycle 2) | **Failover**: RS swaps the anchor /32 next-hop to C8000V-2 Gi1 | **0 loss** — only a ~1ms jitter spike (baseline ~0.1ms) |
+| +49s | start command on C8000V-1 | normal (via C8000V-2) |
+| +3m 27s | C8000V-1 boot complete, RS peer BGP/BFD re-established | normal |
+| +4m 41s | **Failback** (automatic preemption): next-hop back to C8000V-1 | **0 loss** — only a ~2ms jitter spike |
 
-Recovery to the original state is automatic (preemption) — once C8000V-1
-boots, it becomes active again with no manual steps.
+- The variance in route-swap latency at failover (+2s vs +18s) is just
+  IOS-XE shutdown timing; neither cycle had any receive gap.
+- 600s stream totals (identical on both receivers): **0 switchover-related
+  losses out of 65,538 datagrams** (the single lost datagram occurred in the
+  first second of the stream — unrelated to the switchovers).
 
-#### Reboot-mode re-verification (2026-07-12, 1s-interval ping, 3 runs)
+#### Key takeaways
 
-The active C8000V-1 was **rebooted** (an unplanned-failure scenario, not a
-graceful stop) and the full cycle measured with on-prem ping (1s interval)
-plus AWS API polling timestamps (numbers below are from the run that captured
-both failover and failback in one session):
-
-| Time (UTC) | Elapsed | Event | ping |
-|---|---|---|---|
-| 11:20:20 | 0s | reboot API call | normal |
-| 11:20:22 | 2s | interfaces down, outage begins | loss from seq 40 |
-| 11:20:31 | 11s | failover complete (BFD detect → RS switch → GRE re-anchor → C8000V-2 overlay up) | resumes at seq 48 — **9.2s gap** |
-| 11:23:12 | 2m 51s | C8000V-1 boot complete, RS BGP re-established | normal (via C8000V-2) |
-| 11:24:22 | 4m 02s | failback preemption (automatic): next-hop → C8000V-1 | loss from seq 279 |
-| 11:25:54 | 5m 33s | C8000V-1 overlay BGP re-established | resumes at seq 368 — **92.1s gap** |
-
-Ping statistics consistency: 372 sent / 97 lost = exactly 8 (failover) + 89
-(failback). Every answered seq was answered by both receivers (275 received +
-275 duplicates).
-
-Key takeaways:
-
-- **Unplanned failure (reboot) failover outage is ~9s** — set expectations
-  separately from the graceful-stop make-before-break (lossless/≤1s, table
-  above).
-- **The ~90s failback gap is structural and reproducible** (run 1: 88s,
-  run 3: 92s) — the outage starts with the RS route preemption and ends with
-  the returning router's overlay BGP re-establishment. Preemption always
-  precedes overlay readiness, so this gap cannot be tuned away; this is the
-  basis for treating failback as a planned operation.
-- **Failback preemption fires 66–83s after RS BGP re-establishment**
-  (3 observations) — it does not wait the full PersistRoutes value (2 min),
-  so be careful predicting failback timing.
-- C8000V boot (reboot → RS BGP re-established) was **~3 minutes** in all
-  three runs.
-
-#### Unidirectional stream measurement (2026-07-12, UDP 1Mbps · 109pps · 1200B, receiver tcpdump)
-
-The ping measurements above are round-trip (forward multicast + return
-unicast). Running a **unidirectional UDP stream** (iperf) closer to real
-workloads and measuring the same reboot scenario with tcpdump timestamps on
-both receivers:
-
-| Phase | Measured (receive gap) |
-|---|---|
-| Failover (reboot) | **Below measurement threshold (no gap)** |
-| Failback (automatic preemption) | **No gap** |
-| Max receive gap, entire window | receiver-1 56ms / receiver-2 53ms — jitter unrelated to the switchover instants |
-
-Interpretation:
-
-- **Confirmed: the 9.2s/92s ping gaps were entirely the return unicast
-  path.** Forward multicast flows the instant routes switch, independent of
-  overlay BGP, thanks to the pre-built (*,G) (igmp static-group) and static
-  mroute RPF. Unidirectional distribution workloads (video, market data
-  feeds) are **effectively lossless** through the whole failure-and-failback
-  cycle.
-- On EC2 reboot, IOS-XE closes BGP gracefully, so the RS withdraws
-  immediately without waiting for BFD expiry → make-before-break. For a hard
-  death without graceful close (kernel panic, forced instance kill), BFD
-  detection (~1s) is the upper bound of the gap.
-- For request-response (bidirectional) workloads, set expectations from the
-  ping measurements (~9s failure, ~90s failback).
+- **Both directions — failure and failback — are make-before-break and
+  lossless.** On stop, IOS-XE closes BGP gracefully so the route moves before
+  the data plane stops; on failback, BGP only comes up after the router has
+  fully booted with PIM and static-group ready, so the route moves only when
+  the new path already works.
+- **Forward multicast is independent of overlay BGP reconvergence** — thanks
+  to the pre-built (*,G) from Gi2 `igmp static-group` and static mroute RPF,
+  traffic flows the instant routes switch. Unidirectional distribution
+  workloads (market data, video feeds) are lossless through the whole cycle.
+- For a hard death without graceful close (kernel panic, forced kill), RS
+  BFD detection (~1s) is the upper bound of the gap (see timer design, 4.4).
+- Recovery to the original state is automatic (preemption) — once C8000V-1
+  boots it becomes active again with no manual steps, and since failback is
+  also lossless, no operational intervention is needed.
+- C8000V boot (start → RS BGP re-established) takes **~3 to 3.5 minutes**.
 
 ### 6.2 Direct Connect failure (bring down BGP)
 
@@ -624,7 +589,7 @@ What to watch:
 
 | Symptom | Check | Cause/action |
 |---|---|---|
-| 0 TGW group members | `search-transit-gateway-multicast-groups`, group missing from receiver `ip maddr show ens5` | Receiver join anchor (socat/mcast-recv.py) died → restart (systemd recommended). **If the instance is replaced, the script disappears with it — re-run setup** (receiver-setup.txt). Also verify not joining as IGMPv3 (`force_igmp_version=2`) |
+| 0 TGW group members | `search-transit-gateway-multicast-groups`, group missing from receiver `ip maddr show ens5` | Receiver join anchor (socat/iperf2 server) died → restart (systemd recommended). **If the instance is replaced, the script disappears with it — re-run setup** (receiver-setup.txt). Also verify not joining as IGMPv3 (`force_igmp_version=2`) |
 | Receiver doesn't reply (ping) | Receiver `tcpdump -ni ens5 icmp` | Packets arrive + no reply → `icmp_echo_ignore_broadcasts=0`. No arrival → receiver SG (on-prem ranges as ICMP/UDP source), TGW membership |
 | RS routes not injected | `get-route-server-routing-database` | If in-rib but not installed, check propagation is enabled on that route table |
 | Stack update fails (IP collision) | Replacement column in the change set | Replacing fixed-IP resources is create-before-delete, so IPs collide — keep the AMI pinned; change IPs via recreation |

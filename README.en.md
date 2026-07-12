@@ -1,4 +1,4 @@
-# Multicast GRE Anchor Redundancy with VPC Route Server
+# Multicast GRE Anchor Redundancy with Amazon VPC Route Server
 
 **GRE anycast anchor × TGW multicast domain × VPC Route Server (BGP+BFD) — a hybrid multicast architecture verified by live measurement**
 

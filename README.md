@@ -2,6 +2,8 @@
 
 **GRE 애니캐스트 앵커 × TGW 멀티캐스트 도메인 × VPC Route Server(BGP+BFD) — 실측으로 검증한 하이브리드 멀티캐스트 아키텍처**
 
+> English version: [README.en.md](README.en.md)
+
 온프레미스 멀티캐스트 소스를 **GRE(애니캐스트 앵커) + TGW 멀티캐스트 도메인(IGMPv2)**으로
 AWS 리시버까지 전달하는 하이브리드 멀티캐스트 HA 구성입니다.
 장애 전환은 **VPC Route Server(BGP+BFD) + AS-path prepending**이 VPC 라우팅을

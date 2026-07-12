@@ -4,11 +4,43 @@
 
 > 한국어 문서: [README.md](README.md)
 
-This is a hybrid multicast HA design that delivers on-premises multicast sources
-to AWS receivers via **GRE (anycast anchor) + TGW multicast domain (IGMPv2)**.
-Failover is performed by **VPC Route Server (BGP+BFD) + AS-path prepending**
-switching VPC routing — the on-premises side (CGW) fails over with **zero
-configuration changes**.
+This hybrid design carries on-premises multicast traffic to AWS receivers in
+three steps. The on-premises router (CGW) sends multicast through a **GRE
+tunnel** to a router (C8000V) inside the VPC; that router emits the traffic
+into the **TGW multicast domain (IGMPv2)**; and the domain replicates it to
+every joined receiver.
+
+High availability hinges on **anycast**. The two VPC routers share one tunnel
+endpoint address (a shared loopback), and **VPC Route Server** decides which
+of them actually receives the tunnel. When the active router dies, Route
+Server detects it via BFD in under a second and repoints the VPC route to the
+standby (priority expressed with AS-path prepend); the tunnel simply
+re-attaches to the standby at the same address. The on-premises CGW **changes
+nothing** — its tunnel destination never moves.
+
+## Executive summary
+
+This document covers an actual deployment of the design in the Seoul region,
+measured by repeatedly killing the active router. The key operational
+questions and their measured answers:
+
+| Question | Measured answer |
+|---|---|
+| If a router dies suddenly, how long do unidirectional streams (market data, video) stop? | **They don't** — max receive gap of 56ms (jitter level) across repeated reboot tests |
+| What about request-response (bidirectional) traffic? | ~9s on failure, ~90s gap on automatic failback |
+| How fast does the VPC route switch? | **~1s** after BFD detection (effectively 0 on graceful shutdown) |
+| Is automatic failback safe? | Multicast is lossless. Only the return path sees a ~90s gap, which is structural (cannot be tuned away) → **treat failback as a planned operation** |
+| What does the on-premises router do during failover? | **Nothing** — the tunnel destination (anycast address) never changes |
+
+Three things for operators to remember:
+
+1. **Keep multicast payloads ≤1400B** — datagrams over the tunnel MTU (1476)
+   vanish silently, in their entirety (ping still passes, which makes this
+   easy to misdiagnose; see 5.2).
+2. **Receiver membership lives exactly as long as the join anchor process** —
+   keep it under systemd, and re-run setup after instance replacement (5.3).
+3. **The ~90s failback return gap cannot be eliminated** — perform failback
+   in a planned window, such as outside market hours (4.1).
 
 ## Background
 

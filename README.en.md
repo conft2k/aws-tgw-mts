@@ -18,30 +18,6 @@ standby (priority expressed with AS-path prepend); the tunnel simply
 re-attaches to the standby at the same address. The on-premises CGW **changes
 nothing** — its tunnel destination never moves.
 
-## Executive summary
-
-This document covers an actual deployment of the design in the Seoul region,
-measured by repeatedly killing the active router. The key operational
-questions and their measured answers:
-
-| Question | Measured answer |
-|---|---|
-| If a router dies suddenly, how long do unidirectional streams (market data, video) stop? | **They don't** — max receive gap of 56ms (jitter level) across repeated reboot tests |
-| What about request-response (bidirectional) traffic? | ~9s on failure, ~90s gap on automatic failback |
-| How fast does the VPC route switch? | **~1s** after BFD detection (effectively 0 on graceful shutdown) |
-| Is automatic failback safe? | Multicast is lossless. Only the return path sees a ~90s gap, which is structural (cannot be tuned away) → **treat failback as a planned operation** |
-| What does the on-premises router do during failover? | **Nothing** — the tunnel destination (anycast address) never changes |
-
-Three things for operators to remember:
-
-1. **Keep multicast payloads ≤1400B** — datagrams over the tunnel MTU (1476)
-   vanish silently, in their entirety (ping still passes, which makes this
-   easy to misdiagnose; see 5.2).
-2. **Receiver membership lives exactly as long as the join anchor process** —
-   keep it under systemd, and re-run setup after instance replacement (5.3).
-3. **The ~90s failback return gap cannot be eliminated** — perform failback
-   in a planned window, such as outside market hours (4.1).
-
 ## Background
 
 ### The problem: two gaps in hybrid multicast

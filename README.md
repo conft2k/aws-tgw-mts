@@ -248,8 +248,27 @@ aws ec2 describe-route-tables --filters "Name=tag:Name,Values=mcast-tgw-rtb"
 ping -t 8 239.1.1.1        # TTL 필수 (기본 1이면 첫 라우터에서 소멸)
 ```
 
-조인된 리시버들이 각자 유니캐스트로 응답합니다 — seq당 응답 2개(두 번째는 `DUP!`)가 정상,
-첫 1~2개 seq 무응답은 (S,G) 트리 형성 시간으로 정상입니다.
+조인된 리시버들이 각자 유니캐스트로 응답합니다. 실측 출력(2026-07-12):
+
+```
+labuser@vm51:~$ ping -t 8 239.1.1.1
+PING 239.1.1.1 (239.1.1.1) 56(84) bytes of data.
+64 bytes from 10.1.1.84: icmp_seq=1 ttl=125 time=33.1 ms
+64 bytes from 10.1.1.116: icmp_seq=1 ttl=125 time=34.4 ms
+64 bytes from 10.1.1.84: icmp_seq=2 ttl=125 time=4.36 ms
+64 bytes from 10.1.1.116: icmp_seq=2 ttl=125 time=5.16 ms
+```
+
+판독 요점:
+
+- **seq당 응답 2개** = 리시버 2대가 각자 응답. 멀티캐스트 대상 ping은 다중 응답이
+  전제라 `DUP!` 표시는 붙지 않습니다 (유니캐스트 ping의 중복 응답과 다름).
+- **ttl=125** = 소스 기준 3홉(CGW → C8000V → 리시버, 128−3). 경로가 설계보다 길거나
+  짧으면 이 값이 달라집니다.
+- **첫 응답만 RTT 큼(33ms → 이후 4~5ms)** = RP-tree 경유 후 SPT 전환. (S,G) 트리가
+  이미 형성된 상태에서 재시작하면 첫 seq부터 바로 응답하고, 콜드 스타트면
+  첫 1~2개 seq 무응답이 정상입니다.
+
 TGW 멤버 확인: `aws ec2 search-transit-gateway-multicast-groups --transit-gateway-multicast-domain-id <id>`
 
 ---
@@ -325,3 +344,160 @@ router bgp 65000
 | 리시버가 응답 안 함 (ping) | 리시버 `tcpdump -ni ens5 icmp` | 패킷 도착 O + 응답 X → `icmp_echo_ignore_broadcasts=0`. 도착 X → 리시버 SG(ICMP/UDP 소스에 온프렘 대역), TGW 멤버십 |
 | RS 경로 미주입 | `get-route-server-routing-database` | in-rib인데 미설치면 해당 RTB의 propagation 활성 여부 |
 | 스택 업데이트 실패 (IP 충돌) | 변경 세트의 Replacement 컬럼 | 고정 IP 자원의 교체는 생성→삭제 순서라 충돌 — AMI 고정 유지, IP 변경은 재생성으로 |
+
+---
+
+## Appendix. 라우터 상태 샘플 출력 (실측)
+
+정상 운용 상태(C8000V-1 활성 / C8000V-2 대기, 2026-07-12 캡처)에서 EICE 경유로 수집한
+실제 출력입니다. 운영 중 상태 점검 시 아래와 비교하세요 — 특히 **대기 라우터는
+"오버레이 BGP Active(미수립)"가 정상**이라는 점이 헷갈리기 쉽습니다.
+
+### A.1 C8000V-1 (활성 라우터)
+
+`show ip interface brief | exclude unassigned` — Tunnel100 up/up, Lo0 = 애니캐스트 10.255.255.1
+
+```
+Interface              IP-Address      OK? Method Status                Protocol
+GigabitEthernet1       10.1.1.30       YES DHCP   up                    up
+GigabitEthernet2       10.1.1.90       YES NVRAM  up                    up
+Loopback0              10.255.255.1    YES NVRAM  up                    up
+Tunnel0                172.16.100.2    YES unset  up                    up
+Tunnel100              172.16.100.2    YES NVRAM  up                    up
+```
+
+`show ip bgp summary` — RS(.29) 세션은 PfxRcd 0이 정상(RS는 광고하지 않음),
+오버레이(172.16.100.1=CGW)에서 1개 = 온프렘 LAN 172.20.51.0/24
+
+```
+Neighbor        V           AS MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd
+10.1.1.29       4        65100    1922    1880       13    0    0 02:40:04        0
+172.16.100.1    4        65000    3099    3098       13    0    0 02:38:27        1
+```
+
+`show bfd neighbors` — RS(Gi1)와 오버레이(Tu100) 두 세션 모두 Up
+
+```
+NeighAddr                              LD/RD         RH/RS     State     Int
+10.1.1.29                            4097/2807522020 Up        Up        Gi1
+172.16.100.1                         4103/4110       Up        Up        Tu100
+```
+
+`show ip pim neighbor` — Tunnel100 너머로 CGW가 PIM 네이버
+
+```
+Neighbor          Interface                Uptime/Expires    Ver   DR
+Address                                                            Prio/Mode
+172.16.100.1      Tunnel100                02:39:25/00:01:44 v2    1 / S P G
+```
+
+`show ip pim rp mapping` — 정적 RP = CGW Lo0
+
+```
+Group(s): 224.0.0.0/4, Static
+    RP: 172.20.255.1 (ip-172-20-255-1.ap-northeast-2.compute.internal)
+```
+
+`show ip mroute 239.1.1.1` — (*,G)의 수신 인터페이스는 Tunnel100(RPF 네이버 = CGW),
+송출 인터페이스는 Gi2(TGW 도메인으로 방출)
+
+```
+(*, 239.1.1.1), 02:41:17/stopped, RP 172.20.255.1, flags: SJC
+  Incoming interface: Tunnel100, RPF nbr 172.16.100.1, Mroute
+  Outgoing interface list:
+    GigabitEthernet2, Forward/Sparse, 02:41:17/00:00:44, flags:
+```
+
+`show ip mroute 239.1.1.1` — **트래픽이 흐르는 중**에는 (*,G) 아래에 (S,G) 엔트리가
+추가되고 `flags: JT`(SPT 전환 완료)가 붙습니다. 온프렘 소스 172.20.51.10에서
+ping 송신 중 캡처:
+
+```
+(172.20.51.10, 239.1.1.1), 00:00:59/00:02:00, flags: JT
+  Incoming interface: Tunnel100, RPF nbr 172.16.100.1, Mroute
+  Outgoing interface list:
+    GigabitEthernet2, Forward/Sparse, 00:00:59/00:02:00, flags:
+```
+
+`show ip mroute 239.1.1.1 count` — 포워딩 카운터로 트래픽 통과를 정량 확인.
+ping 1초 간격이면 초당 약 1패킷(아래 `52/1/122/0`의 두 번째 필드), RPF failed와
+드롭은 0이어야 합니다. 트래픽이 멎으면 (S,G)는 약 3분 뒤 만료되고 카운터가
+리셋됩니다 — 낮은 카운터 자체는 이상이 아닙니다.
+
+```
+Group: 239.1.1.1, Source count: 1, Packets forwarded: 54, Packets received: 54
+  RP-tree: Forwarding: 2/0/122/0, Other: 2/0/0
+  Source: 172.20.51.10/32, Forwarding: 52/1/122/0, Other: 52/0/0
+```
+
+`show ip bgp neighbors 10.1.1.29 advertised-routes` — RS에 애니캐스트 /32와
+CGW에서 배운 LAN을 재광고 (활성 라우터만 LAN 경로를 가짐)
+
+```
+     Network          Next Hop            Metric LocPrf Weight Path
+ *>   10.255.255.1/32  0.0.0.0                  0         32768 i
+ *>   172.20.51.0/24   172.16.100.1             0             0 65000 i
+```
+
+### A.2 C8000V-2 (대기 라우터)
+
+`show ip interface brief` — 활성과 동일하게 모든 인터페이스 up/up.
+Lo0 10.255.255.1은 두 라우터가 공유(애니캐스트)하며, GRE는 무상태라 터널도 up으로 보입니다.
+
+```
+Interface              IP-Address      OK? Method Status                Protocol
+GigabitEthernet1       10.1.1.40       YES DHCP   up                    up
+GigabitEthernet2       10.1.1.100      YES manual up                    up
+Loopback0              10.255.255.1    YES manual up                    up
+Tunnel100              172.16.100.2    YES manual up                    up
+```
+
+`show ip bgp summary` — **오버레이 세션이 Active(미수립)인 것이 대기 상태의 정상**입니다.
+CGW의 GRE는 RS가 활성으로 정한 라우터에만 앵커되므로, 대기 라우터의 터널로는
+CGW 트래픽이 오지 않아 오버레이 BGP가 수립되지 않습니다.
+
+```
+Neighbor        V           AS MsgRcvd MsgSent   TblVer  InQ OutQ Up/Down  State/PfxRcd
+10.1.1.41       4        65100    3705    3623        8    0    0 05:08:38        0
+172.16.100.1    4        65000       0       0        1    0    0 02:40:22 Active
+```
+
+`show bfd neighbors` — RS(Gi1) 세션만 존재 (오버레이 BFD는 세션 수립 후 생성됨)
+
+```
+NeighAddr                              LD/RD         RH/RS     State     Int
+10.1.1.41                            4097/3274535456 Up        Up        Gi1
+```
+
+`show ip bgp neighbors 10.1.1.41 advertised-routes` — 애니캐스트 /32만 광고
+(AS-path prepend는 아웃바운드 정책이라 이 출력에는 안 보이고, RS 라우팅 DB에서
+AS×4로 확인됩니다). LAN 172.20.51.0/24는 오버레이가 없어 미광고 — 정상.
+
+```
+     Network          Next Hop            Metric LocPrf Weight Path
+ *>   10.255.255.1/32  0.0.0.0                  0         32768 i
+```
+
+`show ip mroute 239.1.1.1` — (*,G)는 있으나 RPF 네이버가 0.0.0.0(터널 너머 PIM 네이버 없음).
+페일오버 시 오버레이가 수립되면 활성과 동일한 형태로 전환됩니다.
+
+```
+(*, 239.1.1.1), 05:09:20/stopped, RP 172.20.255.1, flags: SJC
+  Incoming interface: Tunnel100, RPF nbr 0.0.0.0, Mroute
+  Outgoing interface list:
+    GigabitEthernet2, Forward/Sparse, 05:09:20/00:00:13, flags:
+```
+
+### A.3 활성 vs 대기 판독 요점
+
+| 항목 | 활성 (C8000V-1) | 대기 (C8000V-2) |
+|---|---|---|
+| RS BGP/BFD (Gi1) | Established / Up | Established / Up (동일) |
+| 오버레이 BGP (172.16.100.1) | Established, PfxRcd 1 | **Active (미수립) — 정상** |
+| 오버레이 BFD (Tu100) | Up | 세션 없음 |
+| PIM 네이버 (Tu100) | CGW 172.16.100.1 | 없음 |
+| RS로 광고 | 10.255.255.1/32 + 172.20.51.0/24 | 10.255.255.1/32만 (prepend ×3) |
+| mroute (*,239.1.1.1) | RPF nbr = 172.16.100.1 | RPF nbr = 0.0.0.0 |
+
+두 라우터의 출력이 위 표와 반대라면 페일오버가 일어난 상태입니다 — RS 라우팅 DB와
+`mcast-tgw-rtb`의 10.255.255.1/32 넥스트홉 ENI로 현재 활성 라우터를 교차 확인하세요.

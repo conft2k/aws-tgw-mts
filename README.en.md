@@ -49,10 +49,13 @@ routing policy such as active/standby preference.
 
 ### The value of VPC Route Server — the heart of this design
 
-**Amazon VPC Route Server brings standard routing-protocol semantics to VPC
-route tables.** It peers eBGP with EC2 appliances, dynamically injects the
-routes they advertise into VPC route tables, and withdraws them when a peer
-fails. In this design, its value is:
+Normally a VPC route table is a static list that a human (or an API call)
+fills in. **Amazon VPC Route Server teaches that table to understand BGP.**
+A router (EC2) inside the VPC advertises "send this destination to me," the
+route appears in the table automatically, and when the router dies (detected
+by BFD) the route is withdrawn automatically — what routers have always done
+with each other, now extended to the VPC route table. In this design, its
+value is:
 
 | Value | What it means here | Measured |
 |---|---|---|

@@ -706,8 +706,8 @@ Outputs:
     Description: Attach as C8000V-2 Gi2 (10.1.1.100, src/dest check disabled)
     Value: !Ref Router2Gi2Eni
   RouteServerEndpoint1EniAddress:
-    Description: Substitute for <RSE-1-IP> in section 9.1
+    Description: RS Endpoint-1 IP - C8000V-1's BGP neighbor address (c8000v1-conf.txt)
     Value: !GetAtt RouteServerEndpoint1.EniAddress
   RouteServerEndpoint2EniAddress:
-    Description: Substitute for <RSE-2-IP> in section 9.2
+    Description: RS Endpoint-2 IP - C8000V-2's BGP neighbor address (c8000v2-conf.txt)
     Value: !GetAtt RouteServerEndpoint2.EniAddress

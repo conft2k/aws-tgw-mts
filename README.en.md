@@ -10,17 +10,17 @@ and verified through repeated failure testing.
 
 **Contents**
 
-- [Background](#background) — the problem, the value of Route Server, where it fits, architecture overview
-- [GRE overlay bring-up flow](#gre-overlay-bring-up-flow)
-- [1. Setup order](#1-setup-order)
-- [2. CloudFormation resources](#2-cloudformation-resources)
-- [3. Verification guide](#3-verification-guide)
-- [4. Failover tests](#4-failover-tests) — measured results
-- [5. Monitoring and troubleshooting](#5-monitoring-and-troubleshooting)
+- [1. Background](#1-background) — the problem, the value of Route Server, where it fits, architecture overview
+- [2. GRE overlay bring-up flow](#2-gre-overlay-bring-up-flow)
+- [3. Setup order](#3-setup-order)
+- [4. CloudFormation resources](#4-cloudformation-resources)
+- [5. Verification guide](#5-verification-guide)
+- [6. Failover tests](#6-failover-tests) — measured results
+- [7. Monitoring and troubleshooting](#7-monitoring-and-troubleshooting)
 - [Appendix. Router status sample outputs](#appendix-router-status-sample-outputs-measured)
 - [References (official AWS documentation)](#references-official-aws-documentation)
 
-## Background
+## 1. Background
 
 ### The problem: two gaps in hybrid multicast
 
@@ -77,7 +77,7 @@ many receiving services in the cloud without interruption.
 - **The traffic pattern matches exactly** — exchange market data feeds are
   **unidirectional UDP multicast streams**. The measured results of this
   design (no receive gap across the entire failure-and-failback cycle; see
-  the unidirectional measurement in 4.1) apply to this pattern directly.
+  the unidirectional measurement in 6.1) apply to this pattern directly.
 - **The feed source cannot be touched** — market data reception lines and
   equipment are hard to change for regulatory and contractual reasons. This
   design's property that failover happens entirely on the AWS side, with the
@@ -145,7 +145,7 @@ Failover:  RS detects via BFD → swaps tgw-rtb/receiver-rtb next-hops → re-an
 
 ---
 
-## GRE overlay bring-up flow
+## 2. GRE overlay bring-up flow
 
 The layer-by-layer sequence from tunnel establishment to traffic flow. GRE
 operates with two address layers: the "outer" (underlay) and the "inner"
@@ -210,9 +210,9 @@ CGW's neighbor configuration is also unchanged.
 
 ---
 
-## 1. Setup order
+## 3. Setup order
 
-### 1.1 CloudFormation deployment
+### 3.1 CloudFormation deployment
 
 ```bash
 aws cloudformation create-stack --stack-name mcast-base \
@@ -231,7 +231,7 @@ aws cloudformation create-stack --stack-name mcast-base \
   2. Include `10.1.1.0/24` + `10.255.255.1/32` in the DXGW association
      allowed prefixes (how on-prem learns the tunnel destination over DX)
 
-### 1.2 C8000V router configuration
+### 3.2 C8000V router configuration
 
 1. Launch the two C8000V instances and attach the stack-created ENIs
    (Gi1 = device index 0, Gi2 = device index 1; all created with
@@ -248,7 +248,7 @@ Key points:
 - Keep Gi1 on DHCP (it receives the ENI's fixed IP as-is) — static
   reconfiguration only risks cutting the session.
 
-### 1.3 CGW (on-premises) router configuration
+### 3.3 CGW (on-premises) router configuration
 
 Apply [cgw-conf.txt](cgw-conf.txt). Add it alongside the existing DX Transit
 VIF BGP configuration.
@@ -269,7 +269,7 @@ Key points:
 - Overlay BGP: `fall-over bfd` + `timers 3 9` (safety net that clears stale
   sessions on failback).
 
-### 1.4 EC2 receiver setup (IGMPv2)
+### 3.4 EC2 receiver setup (IGMPv2)
 
 Apply the [receiver-setup.txt](receiver-setup.txt) procedure to both receivers. Summary:
 
@@ -289,15 +289,15 @@ sudo systemd-run --unit=mcast-anchor --property=Restart=always \
   [receiver-setup.txt](receiver-setup.txt) works as the join anchor (both
   keep the group membership alive).
 - **iperf3 does not support multicast** — send stream tests from on-prem
-  with iperf2 (see 3.5).
+  with iperf2 (see 5.5).
 - Access: no key pair needed —
   `aws ec2-instance-connect ssh --instance-id <id> --connection-type eice`
 
 ---
 
-## 2. CloudFormation resources
+## 4. CloudFormation resources
 
-### 2.1 VPC subnets (VPC 10.1.1.0/24, contiguous per service)
+### 4.1 VPC subnets (VPC 10.1.1.0/24, contiguous per service)
 
 | CIDR | Subnet | AZ | Purpose | Service supernet (for SG/ACL) |
 |---|---|---|---|---|
@@ -313,7 +313,7 @@ sudo systemd-run --unit=mcast-anchor --property=Restart=always \
 > the attachment uses dedicated subnets, the domain associates the receiver
 > subnets.
 
-### 2.2 ENIs / IPs
+### 4.2 ENIs / IPs
 
 | IP | Purpose | Fixed? |
 |---|---|---|
@@ -326,7 +326,7 @@ sudo systemd-run --unit=mcast-anchor --property=Restart=always \
 | (auto) | RS Endpoint-1/2 (BGP peer addresses, see Outputs) | ❌ Auto-assigned (cannot be set) |
 | (auto) | TGW attachment ENIs ×2, EICE | ❌ Auto-assigned (cannot be set) |
 
-### 2.3 BGP ASNs / peerings
+### 4.3 BGP ASNs / peerings
 
 | Session | Side A | Side B | Detection | Role |
 |---|---|---|---|---|
@@ -335,9 +335,9 @@ sudo systemd-run --unit=mcast-anchor --property=Restart=always \
 | GRE overlay | CGW 65000 (172.16.100.1) | Active C8000V 65200 (172.16.100.2 shared) | BFD 500ms×3, hold 3/9 | Carries LAN (172.20.51.0/24) to AWS. Standby's session stays down (anycast property) |
 | TGW | TGW 65400 | DXGW 65300 | — | DXGW association (allowed-prefix advertisement) |
 
-### 2.4 Timer design — covering both graceful shutdown and sudden death
+### 4.4 Timer design — covering both graceful shutdown and sudden death
 
-The reboot in the failover measurements (4.1) is a "polite" failure: IOS-XE
+The reboot in the failover measurements (6.1) is a "polite" failure: IOS-XE
 closes BGP gracefully before going down. Sudden death — kernel panic,
 hypervisor failure, forced instance termination — gives no such signal, and
 detection falls to the BFD/BGP timers below.
@@ -355,7 +355,7 @@ detection falls to the BFD/BGP timers below.
   a few more seconds until the standby's overlay BGP establishes (comparable
   to the measured 9.2s in the reboot test).
 - **For graceful shutdown**: the BGP notification arrives before BFD expiry,
-  so make-before-break holds — measured lossless (4.1 unidirectional).
+  so make-before-break holds — measured lossless (6.1 unidirectional).
 - **Why not tighter**: tightening BFD to e.g. 100ms×3 speeds detection but
   makes the overlay BFD — which crosses DX — sensitive to path jitter and
   prone to false flaps. The asymmetry of 300ms on the directly-attached
@@ -363,9 +363,9 @@ detection falls to the BFD/BGP timers below.
 
 ---
 
-## 3. Verification guide
+## 5. Verification guide
 
-### 3.1 C8000V health
+### 5.1 C8000V health
 
 ```
 show ip bgp summary                  ! RS (.29/.41) Established; overlay only on the active router
@@ -375,7 +375,7 @@ show ip mroute 239.1.1.1 count       ! (S,G) forwarding counters increasing = tr
 show interfaces Tunnel100 | include packets
 ```
 
-### 3.2 CGW health
+### 5.2 CGW health
 
 ```
 show ip route 10.255.255.1           ! BGP route via DX (169.254.96.x)
@@ -387,7 +387,7 @@ show ip mroute 239.1.1.1             ! with a source sending: (S,G) + OIL Tunnel
 show ip pim tunnel                   ! Tu0(Encap)/Tu1(Decap) = auto-created by PIM, normal
 ```
 
-### 3.3 VPC Route Server health
+### 5.3 VPC Route Server health
 
 ```bash
 aws ec2 describe-route-server-peers \
@@ -402,7 +402,7 @@ aws ec2 describe-route-tables --filters "Name=tag:Name,Values=mcast-tgw-rtb"
 # Expect: 10.255.255.1/32 -> active C8000V Gi1 ENI
 ```
 
-### 3.4 End-to-end test (multicast ping)
+### 5.4 End-to-end test (multicast ping)
 
 From the on-premises multicast server:
 
@@ -435,7 +435,7 @@ How to read it:
 
 Check TGW members: `aws ec2 search-transit-gateway-multicast-groups --transit-gateway-multicast-domain-id <id>`
 
-### 3.5 End-to-end test (iperf2 UDP stream — workload-like)
+### 5.5 End-to-end test (iperf2 UDP stream — workload-like)
 
 Ping is a quick round-trip check; workload validation and loss measurement
 use a unidirectional UDP stream. **Only iperf2 supports multicast** (iperf3
@@ -449,7 +449,7 @@ iperf -c 239.1.1.1 -u -T 8 -t 600 -i 1 -b 1M -l 1200
 
 - `-T 8`: TTL required (default 1 dies at the CGW)
 - `-l 1200`: **datagram size required** — the default 1470B exceeds the
-  tunnel MTU (1476) and is silently lost in its entirety (see 5.2). 1200B
+  tunnel MTU (1476) and is silently lost in its entirety (see 7.2). 1200B
   leaves headroom at 1228B including UDP/IP
 - `-b 1M -l 1200` = ~109 packets/s → loss-measurement resolution ~9ms
 
@@ -478,14 +478,14 @@ awk '{if(prev){g=$1-prev; if(g>max){max=g; at=prev}} prev=$1}
      END {printf "max_gap=%.3fs at %.3f\n", max, at}' /tmp/mcast-times.txt
 ```
 
-Measured example (entire 4.1 reboot test): receiver-1 `max_gap=0.056s`,
+Measured example (entire 6.1 reboot test): receiver-1 `max_gap=0.056s`,
 receiver-2 `max_gap=0.053s` — lossless including failover and failback.
 
 ---
 
-## 4. Failover tests
+## 6. Failover tests
 
-### 4.1 C8000V router failure (measured)
+### 6.1 C8000V router failure (measured)
 
 Procedure: with `ping -D -t 8 239.1.1.1 -i 0.1` running from on-prem, stop the
 active C8000V instance.
@@ -571,7 +571,7 @@ Interpretation:
 - For request-response (bidirectional) workloads, set expectations from the
   ping measurements (~9s failure, ~90s failback).
 
-### 4.2 Direct Connect failure (bring down BGP)
+### 6.2 Direct Connect failure (bring down BGP)
 
 Bring down BGP on one of the two DX Transit VIFs to verify underlay redundancy.
 
@@ -594,9 +594,9 @@ What to watch:
 
 ---
 
-## 5. Monitoring and troubleshooting
+## 7. Monitoring and troubleshooting
 
-### 5.1 C8000V
+### 7.1 C8000V
 
 | Symptom | Check | Cause/action |
 |---|---|---|
@@ -606,7 +606,7 @@ What to watch:
 | Post-failover logs | `show logging \| include %BGP\|%BFD` | Analyze switchover timing from ADJCHANGE/BFD event timeline |
 | Access | EICE: `aws ec2-instance-connect ssh` or SSH ProxyCommand `open-tunnel` | If the pem fails with `error in libcrypto`, decode the base64 body to DER and regenerate |
 
-### 5.2 CGW
+### 7.2 CGW
 
 | Symptom | Check | Cause/action |
 |---|---|---|
@@ -617,7 +617,7 @@ What to watch:
 | Overlay BGP flap | `show ip bgp neighbors 172.16.100.2` | hold 3/9 is intentional. If it flaps repeatedly, check DX path quality |
 | **Large UDP silently lost, ping passes** | C8000V `show ip mroute <grp> count` — source counter 0 | **Tunnel MTU (1476) overrun** (measured: iperf's default 1470B is lost entirely — it never even reaches the C8000V; 1200B passes). If payload + UDP/IP 28B exceeds 1476, DF-set packets are dropped at the CGW tunnel ingress, and even fragments that make it through are dropped by TGW (fragmented multicast is unsupported, per official docs) — keep multicast app payloads **≤1400B** (iperf: `-l 1200`) |
 
-### 5.3 AWS / receivers
+### 7.3 AWS / receivers
 
 | Symptom | Check | Cause/action |
 |---|---|---|
@@ -802,14 +802,14 @@ database and the 10.255.255.1/32 next-hop ENI in `mcast-tgw-rtb`.
 - [How Amazon VPC Route Server works](https://docs.aws.amazon.com/vpc/latest/userguide/route-server-how-it-works.html) — endpoint/peer/BFD/Persist Routes concepts
 
 **AWS Transit Gateway multicast**
-- [Multicast in AWS Transit Gateway](https://docs.aws.amazon.com/vpc/latest/tgw/tgw-multicast-overview.html) — basis for section 5: IGMPv2 query cycle (2 min), SG/NACL requirements (protocol 2, source 0.0.0.0/32), etc.
+- [Multicast in AWS Transit Gateway](https://docs.aws.amazon.com/vpc/latest/tgw/tgw-multicast-overview.html) — basis for section 7: IGMPv2 query cycle (2 min), SG/NACL requirements (protocol 2, source 0.0.0.0/32), etc.
 - [Multicast domains](https://docs.aws.amazon.com/vpc/latest/tgw/multicast-domains-about.html)
-- [Transit Gateway quotas (incl. MTU)](https://docs.aws.amazon.com/vpc/latest/tgw/transit-gateway-quotas.html) — **fragmented multicast packets are dropped**: directly related to the GRE MTU trap in 5.2
+- [Transit Gateway quotas (incl. MTU)](https://docs.aws.amazon.com/vpc/latest/tgw/transit-gateway-quotas.html) — **fragmented multicast packets are dropped**: directly related to the GRE MTU trap in 7.2
 
 **AWS Direct Connect**
 - [Direct Connect gateways](https://docs.aws.amazon.com/directconnect/latest/UserGuide/direct-connect-gateways-intro.html)
 - [Transit gateway associations (Transit VIF)](https://docs.aws.amazon.com/directconnect/latest/UserGuide/direct-connect-transit-gateways.html)
-- [Allowed prefixes interactions](https://docs.aws.amazon.com/directconnect/latest/UserGuide/allowed-to-prefixes.html) — basis for manual step ② in 1.1
+- [Allowed prefixes interactions](https://docs.aws.amazon.com/directconnect/latest/UserGuide/allowed-to-prefixes.html) — basis for manual step ② in 3.1
 
 **Miscellaneous**
 - [EC2 Instance Connect Endpoint](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/connect-with-ec2-instance-connect-endpoint.html) — key-pair-less SSH access to routers/receivers

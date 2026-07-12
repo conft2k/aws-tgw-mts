@@ -51,7 +51,7 @@ aws ec2 search-transit-gateway-multicast-groups \
 # (TTL must survive: server -> CGW -> GRE -> C8000V -> TGW -> receiver)
 # iperf2 only (iperf3 has no multicast). Keep payload <= 1400B - larger
 # datagrams (e.g. iperf's default 1470B) exceed the GRE tunnel MTU (1476)
-# and vanish silently. See README 3.5/5.2. Working example:
+# and vanish silently. See README 5.5/7.2. Working example:
 #   iperf -c 239.1.1.1 -u -T 8 -t 600 -i 1 -b 1M -l 1200
 # then on CGW:      show ip mroute 239.1.1.1   -> (S,G) with Tunnel100 in OIL
 # on C8000V-1:      show ip mroute 239.1.1.1   -> (S,G), OIL Gi2

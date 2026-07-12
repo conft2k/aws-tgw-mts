@@ -1,4 +1,4 @@
-# 온프레미스에서 AWS까지, 무손실 멀티캐스트 HA
+# VPC Route Server 기반 멀티캐스트 GRE 앵커 이중화
 
 **GRE 애니캐스트 앵커 × TGW 멀티캐스트 도메인 × VPC Route Server(BGP+BFD) — 실측으로 검증한 하이브리드 멀티캐스트 아키텍처**
 

@@ -1,0 +1,51 @@
+# ============================================================================
+# Multicast receiver setup (mcast-receiver-ec2-az1 / az2, AL2023)
+# Run the same steps on BOTH receivers:
+#   az1: i-0a42fa4759fcb10be (10.1.1.84)
+#   az2: i-0278c486485c145c5 (10.1.1.116)
+# ============================================================================
+
+# --- 0. Connect (EC2 Instance Connect Endpoint; instances have no key pair) --
+# From a machine with AWS CLI (region ap-northeast-2). The console
+# "EC2 Instance Connect" button also works.
+aws ec2-instance-connect ssh --instance-id i-0a42fa4759fcb10be --connection-type eice
+
+# --- 1. Force IGMPv2 (TGW multicast supports IGMPv2 only; AL2023 default v3) -
+sudo sysctl -w net.ipv4.conf.all.force_igmp_version=2
+sudo sysctl -w net.ipv4.conf.default.force_igmp_version=2
+# persist across reboots
+echo -e "net.ipv4.conf.all.force_igmp_version=2\nnet.ipv4.conf.default.force_igmp_version=2" | sudo tee /etc/sysctl.d/99-igmpv2.conf
+
+# --- 2. Join 239.1.1.1 and listen (test receiver, UDP port 5001) -------------
+cat <<'EOF' > /home/ec2-user/mcast-recv.py
+import socket, struct, datetime
+GRP, PORT = '239.1.1.1', 5001
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('', PORT))
+s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+             struct.pack('4s4s', socket.inet_aton(GRP), socket.inet_aton('0.0.0.0')))
+print(f'joined {GRP}, listening :{PORT}', flush=True)
+while True:
+    data, addr = s.recvfrom(65535)
+    print(f'{datetime.datetime.now()} {addr[0]}:{addr[1]} {len(data)}B', flush=True)
+EOF
+nohup python3 /home/ec2-user/mcast-recv.py > /home/ec2-user/mcast-recv.log 2>&1 &
+
+# --- 3. Verify on the instance ------------------------------------------------
+# IGMPv2 in effect + group joined (239.1.1.1 = 010101EF little-endian):
+cat /proc/net/igmp          # V2 column for the group entry, no V3 reports
+tail -f /home/ec2-user/mcast-recv.log
+
+# --- 4. Verify on AWS (from the workstation) ----------------------------------
+# Receiver ENIs should appear as members within ~2 min (TGW IGMP query cycle):
+aws ec2 search-transit-gateway-multicast-groups \
+  --transit-gateway-multicast-domain-id tgw-mcast-domain-0acc2ada9722a46f1 \
+  --query 'MulticastGroups[].{Group:GroupIpAddress,Eni:NetworkInterfaceId,Member:GroupMember}' --output table
+
+# --- 5. End-to-end: start the multicast server on-prem (Gi4 LAN) --------------
+# e.g. iperf/ffmpeg/socat sending UDP to 239.1.1.1:5001 with TTL >= 8
+# (TTL must survive: server -> CGW -> GRE -> C8000V -> TGW -> receiver)
+# then on CGW:      show ip mroute 239.1.1.1   -> (S,G) with Tunnel100 in OIL
+# on C8000V-1:      show ip mroute 239.1.1.1   -> (S,G), OIL Gi2
+# on the receiver:  tail mcast-recv.log        -> packets arriving

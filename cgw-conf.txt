@@ -1,0 +1,99 @@
+! ============================================================================
+! CGW additional config - anycast single-tunnel HA design
+! Baseline: CGW running config as of 2026-07-12 14:19 KST (post-reset state)
+!   already in place: DX Transit VIF BGP (169.254.96.49/.57, BFD),
+!   Gi4 LAN 172.20.51.1/24 + ip pim sparse-mode (multicast server attached),
+!   ip multicast-routing distributed, network 172.20.51.0/24
+!   NOT present yet: Loopback0, GRE tunnel, PIM RP, all prefix-lists
+! Design recap:
+!   - Lo0 172.20.255.1/32 = GRE source + PIM RP, advertised to DX (Lo0 only)
+!   - single GRE tunnel to the shared C8000V anycast Lo0 10.255.255.1
+!     (learned over DX; failover is AWS-side: Route Server BFD + AS prepend)
+!   - LAN 172.20.51.0/24 is advertised over the GRE overlay only; applying
+!     LOOPBACK-ONLY below withdraws it from DX (unicast shifts to the tunnel)
+! ============================================================================
+!
+configure terminal
+!
+! --- 1. GRE/RP loopback ------------------------------------------------------
+interface Loopback0
+ description RP + GRE-Source
+ ip address 172.20.255.1 255.255.255.255
+ ip pim sparse-mode
+!
+ip pim rp-address 172.20.255.1
+!
+! --- 1b. LAN interface (multicast server attached) ---------------------------
+interface GigabitEthernet4
+ ip pim sparse-mode
+!
+! --- 2. Single GRE tunnel to the C8000V anycast anchor -----------------------
+interface Tunnel100
+ description GRE-to-C8000V-anycast-Lo0
+ ip address 172.16.100.1 255.255.255.252
+ ip pim sparse-mode
+ tunnel source Loopback0
+ tunnel destination 10.255.255.1
+ ip mtu 1476
+ ip tcp adjust-mss 1436
+!
+! --- 3. Prefix-lists ----------------------------------------------------------
+! DX underlay: advertise the GRE source (Lo0) only
+ip prefix-list LOOPBACK-ONLY seq 5 permit 172.20.255.1/32
+! GRE overlay: advertise the LAN only
+ip prefix-list ONPREM-LAN seq 5 permit 172.20.51.0/24
+! Overlay inbound guard: VPC CIDR or the anycast anchor learned over the
+! tunnel would recurse the GRE destination into the tunnel and flap it
+ip prefix-list TUNNEL-IN seq 5 deny 10.1.1.0/24 le 32
+ip prefix-list TUNNEL-IN seq 8 deny 10.255.255.1/32
+ip prefix-list TUNNEL-IN seq 10 permit 0.0.0.0/0 le 32
+!
+! --- 4. BGP: Lo0 to DX (with filter), LAN to the overlay ----------------------
+router bgp 65000
+ neighbor 172.16.100.2 remote-as 65200
+ address-family ipv4
+  network 172.20.255.1 mask 255.255.255.255
+  ! NOTE: adding LOOPBACK-ONLY withdraws 172.20.51.0/24 from DX (by design)
+  neighbor 169.254.96.49 prefix-list LOOPBACK-ONLY out
+  neighbor 169.254.96.57 prefix-list LOOPBACK-ONLY out
+  neighbor 172.16.100.2 activate
+  neighbor 172.16.100.2 prefix-list ONPREM-LAN out
+  neighbor 172.16.100.2 prefix-list TUNNEL-IN in
+ exit-address-family
+!
+end
+write memory
+!
+! ============================================================================
+! Failover tuning (APPLIED 2026-07-12, matching config on the C8000V side)
+! - Overlay BFD: tears down the overlay BGP session to a FAILED C8000V in
+!   ~1.5s instead of hold-time -> failover cut from ~40s to ~1s (measured).
+! - timers 3 9: failBACK safety net. On preemption the anycast confuses BFD
+!   (the surviving BFD answers from the other router), so the stale session
+!   is cleaned by hold-time - 9s caps the failback gap (~98s observed with
+!   default timers). IOS warns about <20s hold; acceptable here: DX path is
+!   stable, real failures are caught by BFD, and a rare flap self-heals in
+!   seconds. Use 5/15 if the warning matters in production.
+!
+configure terminal
+interface Tunnel100
+ bfd interval 500 min_rx 500 multiplier 3
+router bgp 65000
+ neighbor 172.16.100.2 fall-over bfd
+ neighbor 172.16.100.2 timers 3 9
+end
+write memory
+!
+! ============================================================================
+! Verification (AWS side is already up: RS peers BGP/BFD up, anycast /32
+! installed toward C8000V-1 in the VPC route tables)
+!   show ip route 10.255.255.1          -> BGP via DX underlay (169.254.96.x)
+!   show interface Tunnel100            -> up/up
+!   show ip bgp summary                 -> 172.16.100.2 Established
+!   show ip pim neighbor                -> neighbor on Tunnel100
+!   show ip pim interface               -> Gi4, Lo0, Tunnel100 all listed
+!   show ip mroute 239.1.1.1            -> (S,G) with Tunnel100 in OIL once
+!                                          the server sends and receivers join
+! Failover test: stop C8000V-1 -> VPC routes flip to C8000V-2 (RS BFD),
+! the tunnel re-anchors, overlay BGP/PIM re-establish - no change on CGW.
+! ============================================================================

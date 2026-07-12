@@ -18,9 +18,11 @@ Metadata:
           - AvailabilityZone1
           - RouterSubnet1Cidr
           - ReceiverSubnet1Cidr
+          - TgwSubnet1Cidr
           - AvailabilityZone2
           - RouterSubnet2Cidr
           - ReceiverSubnet2Cidr
+          - TgwSubnet2Cidr
       - Label: { default: '3. AWS side - Transit Gateway' }
         Parameters: [TgwAsn]
       - Label: { default: '4. AWS side - Route Server' }
@@ -37,14 +39,11 @@ Metadata:
           - Router2Gi2Address
           - OnPremCidr
           - OnPremGreSourceCidr
+          - AnycastLoopbackCidr
       - Label: { default: '6. Multicast Receiver EC2' }
         Parameters:
-          - Receiver1Address
-          - Receiver2Address
           - ReceiverInstanceType
           - LatestAmiId
-      - Label: { default: '7. Deployment phase' }
-        Parameters: [CreateRouteServerPeers]
     ParameterLabels:
       VpcCidr: { default: 'Prod VPC CIDR' }
       TgwAsn: { default: 'TGW Amazon-side ASN' }
@@ -56,11 +55,8 @@ Metadata:
       Router2Gi2Address: { default: 'C8000V-2 Gi2 IP (multicast)' }
       OnPremCidr: { default: 'On-prem network CIDR (router SG inbound)' }
       OnPremGreSourceCidr: { default: 'On-prem GRE source CIDR (OnPrem Router Lo0)' }
-      Receiver1Address: { default: 'Receiver-1 IP (AZ1)' }
-      Receiver2Address: { default: 'Receiver-2 IP (AZ2)' }
       ReceiverInstanceType: { default: 'Receiver instance type' }
-      LatestAmiId: { default: 'Latest AL2023 AMI (SSM parameter)' }
-      CreateRouteServerPeers: { default: 'Create RS Peers now? (2nd stage)' }
+      LatestAmiId: { default: 'AL2023 AMI ID (pinned)' }
 
 # ──────────────────────────────────────────────
 # Parameters
@@ -83,18 +79,28 @@ Parameters:
 
   ReceiverSubnet1Cidr:
     Type: String
-    Default: 10.1.1.32/27
-    Description: AZ1 Receiver subnet (C8000V-1 Gi2 + Receivers, multicast domain)
+    Default: 10.1.1.64/27
+    Description: AZ1 Receiver subnet (C8000V-1 Gi2 + Receiver-1, multicast domain)
+
+  TgwSubnet1Cidr:
+    Type: String
+    Default: 10.1.1.224/28
+    Description: AZ1 dedicated TGW attachment subnet (last /28s of the VPC CIDR)
 
   RouterSubnet2Cidr:
     Type: String
-    Default: 10.1.1.64/27
+    Default: 10.1.1.32/27
     Description: AZ2 Router subnet (C8000V-2 Gi1 + RS Endpoint-2)
 
   ReceiverSubnet2Cidr:
     Type: String
     Default: 10.1.1.96/27
-    Description: AZ2 Receiver subnet (C8000V-2 Gi2 + Receivers, multicast domain)
+    Description: AZ2 Receiver subnet (C8000V-2 Gi2 + Receiver-2, multicast domain)
+
+  TgwSubnet2Cidr:
+    Type: String
+    Default: 10.1.1.240/28
+    Description: AZ2 dedicated TGW attachment subnet (last /28s of the VPC CIDR)
 
   AvailabilityZone1:
     Type: AWS::EC2::AvailabilityZone::Name
@@ -121,43 +127,45 @@ Parameters:
 
   OnPremCidr:
     Type: String
-    Default: 192.168.0.0/16
-    Description: On-prem network range - allowed inbound on the C8000V router SG
+    Default: 172.20.0.0/16
+    Description: >-
+      On-prem network range (LAN + router Lo0) - allowed inbound on the
+      C8000V router SG and as the receiver multicast UDP source
 
   OnPremGreSourceCidr:
     Type: String
-    Default: 192.168.255.1/32
+    Default: 172.20.255.1/32
     Description: On-prem router Loopback0 (GRE tunnel source) - routed to TGW from Router subnets
+
+  AnycastLoopbackCidr:
+    Type: String
+    Default: 10.255.255.1/32
+    Description: >-
+      Shared C8000V Loopback0 /32 (anycast GRE tunnel anchor). Both routers
+      advertise it to the Route Server (C8000V-2 with AS-path prepend); RS
+      injects the winner into the TGW subnet route table. Requires, outside
+      this stack: a TGW static route for this /32 to the VPC attachment and
+      a DXGW allowed prefix so on-prem learns it over DX.
 
   Router1PeerAddress:
     Type: String
-    Default: 10.1.1.10
+    Default: 10.1.1.30
     Description: C8000V-1 Gi1 IP (Route Server Peer-1 address)
 
   Router1Gi2Address:
     Type: String
-    Default: 10.1.1.40
+    Default: 10.1.1.90
     Description: C8000V-1 Gi2 fixed IP (ReceiverSubnet1, multicast interface)
 
   Router2PeerAddress:
     Type: String
-    Default: 10.1.1.90
+    Default: 10.1.1.40
     Description: C8000V-2 Gi1 IP (Route Server Peer-2 address)
 
   Router2Gi2Address:
     Type: String
-    Default: 10.1.1.110
+    Default: 10.1.1.100
     Description: C8000V-2 Gi2 fixed IP (ReceiverSubnet2, multicast interface)
-
-  Receiver1Address:
-    Type: String
-    Default: 10.1.1.50
-    Description: Receiver-1 fixed IP (ReceiverSubnet1, AZ1)
-
-  Receiver2Address:
-    Type: String
-    Default: 10.1.1.120
-    Description: Receiver-2 fixed IP (ReceiverSubnet2, AZ2)
 
   ReceiverInstanceType:
     Type: String
@@ -166,9 +174,11 @@ Parameters:
     Description: Multicast receiver EC2 instance type
 
   LatestAmiId:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
-    Description: The latest AL2023 AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0b16c9b40a3a70d6d
+    Description: >-
+      AL2023 AMI ID (pinned - SSM :latest re-resolves on every stack update
+      and forces receiver replacement, which collides with their fixed IPs)
 
   PersistRoutesDuration:
     Type: Number
@@ -183,20 +193,6 @@ Parameters:
     AllowedValues: ['true', 'false']
     Description: Persist BGP/BFD status changes to an AWS-provisioned SNS topic
 
-  CreateRouteServerPeers:
-    Type: String
-    Default: 'No'
-    AllowedValues: ['Yes', 'No']
-    Description: >-
-      Set to Yes AFTER the C8000V instances are deployed with the Gi1 IPs above.
-      Creates RS Peers (BFD) and enables propagation on the Receiver route table.
-
-# ──────────────────────────────────────────────
-# Conditions
-# ──────────────────────────────────────────────
-Conditions:
-  CreatePeers: !Equals [!Ref CreateRouteServerPeers, 'Yes']
-
 # ──────────────────────────────────────────────
 # Resources
 # ──────────────────────────────────────────────
@@ -210,7 +206,7 @@ Resources:
       EnableDnsSupport: true
       EnableDnsHostnames: true
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-prod-vpc' }
+        - { Key: Name, Value: !Sub '${ProjectName}-vpc' }
 
   RouterSubnet1:
     Type: AWS::EC2::Subnet
@@ -219,7 +215,7 @@ Resources:
       CidrBlock: !Ref RouterSubnet1Cidr
       AvailabilityZone: !Ref AvailabilityZone1
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-subnet-router-az1' }
+        - { Key: Name, Value: !Sub '${ProjectName}-router-sub-az1' }
 
   ReceiverSubnet1:
     Type: AWS::EC2::Subnet
@@ -228,7 +224,7 @@ Resources:
       CidrBlock: !Ref ReceiverSubnet1Cidr
       AvailabilityZone: !Ref AvailabilityZone1
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-subnet-receiver-az1' }
+        - { Key: Name, Value: !Sub '${ProjectName}-receiver-sub-az1' }
 
   RouterSubnet2:
     Type: AWS::EC2::Subnet
@@ -237,7 +233,7 @@ Resources:
       CidrBlock: !Ref RouterSubnet2Cidr
       AvailabilityZone: !Ref AvailabilityZone2
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-subnet-router-az2' }
+        - { Key: Name, Value: !Sub '${ProjectName}-router-sub-az2' }
 
   ReceiverSubnet2:
     Type: AWS::EC2::Subnet
@@ -246,7 +242,26 @@ Resources:
       CidrBlock: !Ref ReceiverSubnet2Cidr
       AvailabilityZone: !Ref AvailabilityZone2
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-subnet-receiver-az2' }
+        - { Key: Name, Value: !Sub '${ProjectName}-receiver-sub-az2' }
+
+  # Dedicated TGW attachment subnets (one per AZ, attachment ENIs only)
+  TgwSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProdVpc
+      CidrBlock: !Ref TgwSubnet1Cidr
+      AvailabilityZone: !Ref AvailabilityZone1
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-tgw-sub-az1' }
+
+  TgwSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProdVpc
+      CidrBlock: !Ref TgwSubnet2Cidr
+      AvailabilityZone: !Ref AvailabilityZone2
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-tgw-sub-az2' }
 
   # ───── Route Tables ─────
   RouterRouteTable:
@@ -254,14 +269,14 @@ Resources:
     Properties:
       VpcId: !Ref ProdVpc
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-rtb-router-underlay' }
+        - { Key: Name, Value: !Sub '${ProjectName}-router-rtb-underlay' }
 
   ReceiverRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref ProdVpc
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-rtb-receiver-rs-propagated' }
+        - { Key: Name, Value: !Sub '${ProjectName}-receiver-rtb-rs-propagated' }
 
   RouterSubnet1RtAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -287,9 +302,44 @@ Resources:
       SubnetId: !Ref ReceiverSubnet2
       RouteTableId: !Ref ReceiverRouteTable
 
+  # TGW attachment subnets: local VPC routes only (implicit local route)
+  TgwRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ProdVpc
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-tgw-rtb' }
+
+  TgwSubnet1RtAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref TgwSubnet1
+      RouteTableId: !Ref TgwRouteTable
+
+  TgwSubnet2RtAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref TgwSubnet2
+      RouteTableId: !Ref TgwRouteTable
+
+  # S3 gateway endpoint: lets the receivers reach the AL2023 dnf repos
+  # (hosted on S3) without internet access - e.g. to install iperf
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref ProdVpc
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref ReceiverRouteTable
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-s3-ep' }
+
   # ───── EC2 Instance Connect Endpoint (SSH access to routers) ─────
   # A single EICE can reach instances in every AZ of the VPC.
-  # Placed in AZ1; AZ2 (C8000V-2) is reached cross-AZ, which requires
+  # Placed in the AZ1 TGW attachment subnet (infra-only subnet; note that
+  # large-scale standards would use a dedicated mgmt subnet so the TGW
+  # subnet NACL stays transit-only). Cross-AZ targets require
   # PreserveClientIp=false.
   EicEndpointSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -303,17 +353,17 @@ Resources:
           CidrIp: !Ref VpcCidr
           Description: SSH to routers in VPC
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-sg-eic-endpoint' }
+        - { Key: Name, Value: !Sub '${ProjectName}-eic-sg' }
 
   EicEndpoint:
     Type: AWS::EC2::InstanceConnectEndpoint
     Properties:
-      SubnetId: !Ref RouterSubnet1
+      SubnetId: !Ref TgwSubnet1
       SecurityGroupIds:
         - !Ref EicEndpointSecurityGroup
       PreserveClientIp: false
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-eice-router-ssh' }
+        - { Key: Name, Value: !Sub '${ProjectName}-ssh-eic' }
 
   # ───── C8000V Router Security Group ─────
   # Attach to the C8000V Gi1/Gi2 ENIs in the instance stack.
@@ -336,7 +386,7 @@ Resources:
           CidrIp: 0.0.0.0/32
           Description: IGMP query from TGW
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-sg-c8000v-router' }
+        - { Key: Name, Value: !Sub '${ProjectName}-c8000v-sg' }
 
   # ───── C8000V Router ENIs (pre-created with fixed IPs) ─────
   # Attach these to the C8000V instances in the instance stack
@@ -352,7 +402,7 @@ Resources:
       SourceDestCheck: false
       Description: C8000V-1 Gi1 - GRE underlay + RS Peer-1
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-eni-c8000v1-gi1' }
+        - { Key: Name, Value: !Sub '${ProjectName}-c8000v1-gi1-eni-az1' }
 
   Router1Gi2Eni:
     Type: AWS::EC2::NetworkInterface
@@ -364,7 +414,7 @@ Resources:
       SourceDestCheck: false
       Description: C8000V-1 Gi2 - multicast interface
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-eni-c8000v1-gi2' }
+        - { Key: Name, Value: !Sub '${ProjectName}-c8000v1-gi2-eni-az1' }
 
   Router2Gi1Eni:
     Type: AWS::EC2::NetworkInterface
@@ -376,7 +426,7 @@ Resources:
       SourceDestCheck: false
       Description: C8000V-2 Gi1 - GRE underlay + RS Peer-2
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-eni-c8000v2-gi1' }
+        - { Key: Name, Value: !Sub '${ProjectName}-c8000v2-gi1-eni-az2' }
 
   Router2Gi2Eni:
     Type: AWS::EC2::NetworkInterface
@@ -388,7 +438,7 @@ Resources:
       SourceDestCheck: false
       Description: C8000V-2 Gi2 - multicast interface
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-eni-c8000v2-gi2' }
+        - { Key: Name, Value: !Sub '${ProjectName}-c8000v2-gi2-eni-az2' }
 
   # ───── Multicast Receiver EC2 (one per AZ) ─────
   # IGMP query (proto 2, src 0.0.0.0/32) must be allowed - TGW is the querier.
@@ -406,14 +456,24 @@ Resources:
           FromPort: 0
           ToPort: 65535
           CidrIp: !Ref VpcCidr
-          Description: Multicast UDP from C8000V Gi2
+          Description: Multicast UDP from VPC senders
+        - IpProtocol: udp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: !Ref OnPremCidr
+          Description: Multicast UDP from on-prem sources (source IP is preserved end-to-end)
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: !Ref OnPremCidr
+          Description: ICMP from on-prem (multicast ping test - echo to the group address)
         - IpProtocol: tcp
           FromPort: 22
           ToPort: 22
           SourceSecurityGroupId: !Ref EicEndpointSecurityGroup
           Description: SSH via EC2 Instance Connect Endpoint
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-sg-receiver' }
+        - { Key: Name, Value: !Sub '${ProjectName}-receiver-sg' }
 
   ReceiverInstance1:
     Type: AWS::EC2::Instance
@@ -421,11 +481,10 @@ Resources:
       ImageId: !Ref LatestAmiId
       InstanceType: !Ref ReceiverInstanceType
       SubnetId: !Ref ReceiverSubnet1
-      PrivateIpAddress: !Ref Receiver1Address
       SecurityGroupIds:
         - !Ref ReceiverSecurityGroup
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-receiver-az1' }
+        - { Key: Name, Value: !Sub '${ProjectName}-receiver-ec2-az1' }
 
   ReceiverInstance2:
     Type: AWS::EC2::Instance
@@ -433,11 +492,10 @@ Resources:
       ImageId: !Ref LatestAmiId
       InstanceType: !Ref ReceiverInstanceType
       SubnetId: !Ref ReceiverSubnet2
-      PrivateIpAddress: !Ref Receiver2Address
       SecurityGroupIds:
         - !Ref ReceiverSecurityGroup
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-receiver-az2' }
+        - { Key: Name, Value: !Sub '${ProjectName}-receiver-ec2-az2' }
 
   # ───── Transit Gateway (Multicast enabled) ─────
   TransitGateway:
@@ -452,20 +510,22 @@ Resources:
       Tags:
         - { Key: Name, Value: !Sub '${ProjectName}-tgw' }
 
-  # Multicast domain associations only accept subnets that belong to the
-  # attachment (one subnet per AZ) -> attach the Receiver subnets. Router
-  # subnets still reach the TGW via their route table because an attachment
-  # exists in the same AZ (dedicated-attachment-subnet pattern).
+  # Dedicated TGW attachment subnets (one per AZ). Multicast domain
+  # associations do NOT require the subnet to belong to the attachment
+  # (verified 2026-07-12 in ap-northeast-2): the domain associates the
+  # Receiver subnets below while the attachment uses these dedicated
+  # subnets. Other subnets reach the TGW via their route tables because
+  # an attachment exists in the same AZ.
   TgwVpcAttachment:
     Type: AWS::EC2::TransitGatewayAttachment
     Properties:
       TransitGatewayId: !Ref TransitGateway
       VpcId: !Ref ProdVpc
       SubnetIds:
-        - !Ref ReceiverSubnet1
-        - !Ref ReceiverSubnet2
+        - !Ref TgwSubnet1
+        - !Ref TgwSubnet2
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-tgw-attach-prod-vpc' }
+        - { Key: Name, Value: !Sub '${ProjectName}-tgw-att-vpc' }
 
   # GRE underlay: route from Router subnets to on-prem Lo0 (tunnel source)
   RouterRtToOnPremLoopback:
@@ -486,7 +546,7 @@ Resources:
         StaticSourcesSupport: disable
         AutoAcceptSharedAssociations: disable
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-tgw-domain-igmpv2' }
+        - { Key: Name, Value: !Sub '${ProjectName}-tgw-dom-igmpv2' }
 
   MulticastDomainAssocReceiver1:
     Type: AWS::EC2::TransitGatewayMulticastDomainAssociation
@@ -511,7 +571,7 @@ Resources:
       PersistRoutesDuration: !Ref PersistRoutesDuration
       SnsNotificationsEnabled: !Ref EnableSnsNotifications
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-route-server-bgp-bfd' }
+        - { Key: Name, Value: !Sub '${ProjectName}-bgp-rs-bfd' }
 
   RouteServerVpcAssociation:
     Type: AWS::EC2::RouteServerAssociation
@@ -526,7 +586,7 @@ Resources:
       RouteServerId: !Ref RouteServer
       SubnetId: !Ref RouterSubnet1
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-rs-endpoint-az1' }
+        - { Key: Name, Value: !Sub '${ProjectName}-bgp-rse-az1' }
 
   RouteServerEndpoint2:
     Type: AWS::EC2::RouteServerEndpoint
@@ -535,12 +595,18 @@ Resources:
       RouteServerId: !Ref RouteServer
       SubnetId: !Ref RouterSubnet2
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-rs-endpoint-az2' }
+        - { Key: Name, Value: !Sub '${ProjectName}-bgp-rse-az2' }
 
-  # ───── Route Server Peers (BFD) - 2nd deployment stage ─────
+  # ───── Route Server Peers (BFD) ─────
+  # Created in the same pass as everything else: a peer only needs the ENI
+  # owning PeerAddress to exist (DependsOn below); BgpStatus stays "down"
+  # until the C8000V comes up and initiates the session.
   RouteServerPeer1:
     Type: AWS::EC2::RouteServerPeer
-    Condition: CreatePeers
+    # Peer creation requires an existing ENI owning PeerAddress (the device
+    # itself may be down - BgpStatus stays "down" until it initiates BGP).
+    # The Gi1 ENI is created in this stack, so make the ordering explicit.
+    DependsOn: Router1Gi1Eni
     Properties:
       RouteServerEndpointId: !Ref RouteServerEndpoint1
       PeerAddress: !Ref Router1PeerAddress
@@ -548,11 +614,11 @@ Resources:
         PeerAsn: !Ref RouterBgpAsn
         PeerLivenessDetection: bfd
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-rs-peer-c8000v1-bfd' }
+        - { Key: Name, Value: !Sub '${ProjectName}-bgp-rsp-c8000v1-bfd' }
 
   RouteServerPeer2:
     Type: AWS::EC2::RouteServerPeer
-    Condition: CreatePeers
+    DependsOn: Router2Gi1Eni
     Properties:
       RouteServerEndpointId: !Ref RouteServerEndpoint2
       PeerAddress: !Ref Router2PeerAddress
@@ -560,16 +626,24 @@ Resources:
         PeerAsn: !Ref RouterBgpAsn
         PeerLivenessDetection: bfd
       Tags:
-        - { Key: Name, Value: !Sub '${ProjectName}-rs-peer-c8000v2-bfd' }
+        - { Key: Name, Value: !Sub '${ProjectName}-bgp-rsp-c8000v2-bfd' }
 
-  # Enable propagation on the Receiver RT only (Router RT stays static)
+  # Enable propagation on the Receiver RT (on-prem LAN return path) and the
+  # TGW subnet RT (anycast Lo0 -> active C8000V Gi1, GRE ingress steering).
+  # Router RT stays static.
   RouteServerReceiverRtPropagation:
     Type: AWS::EC2::RouteServerPropagation
-    Condition: CreatePeers
     DependsOn: RouteServerVpcAssociation
     Properties:
       RouteServerId: !Ref RouteServer
       RouteTableId: !Ref ReceiverRouteTable
+
+  RouteServerTgwRtPropagation:
+    Type: AWS::EC2::RouteServerPropagation
+    DependsOn: RouteServerVpcAssociation
+    Properties:
+      RouteServerId: !Ref RouteServer
+      RouteTableId: !Ref TgwRouteTable
 
 # ──────────────────────────────────────────────
 # Outputs
@@ -585,6 +659,15 @@ Outputs:
     Value: !Ref RouterSubnet2
   ReceiverSubnet2Id:
     Value: !Ref ReceiverSubnet2
+  AnycastLoopback:
+    Description: Shared C8000V Lo0 (GRE anchor) - needs TGW static route + DXGW allowed prefix
+    Value: !Ref AnycastLoopbackCidr
+  TgwSubnet1Id:
+    Description: Dedicated TGW attachment subnet AZ1
+    Value: !Ref TgwSubnet1
+  TgwSubnet2Id:
+    Description: Dedicated TGW attachment subnet AZ2
+    Value: !Ref TgwSubnet2
   ReceiverRouteTableId:
     Value: !Ref ReceiverRouteTable
   TransitGatewayId:
@@ -595,10 +678,10 @@ Outputs:
   RouteServerId:
     Value: !Ref RouteServer
   ReceiverInstance1Id:
-    Description: Multicast receiver AZ1 (10.1.1.50)
+    Description: Multicast receiver AZ1 (IP auto-assigned)
     Value: !Ref ReceiverInstance1
   ReceiverInstance2Id:
-    Description: Multicast receiver AZ2 (10.1.1.120)
+    Description: Multicast receiver AZ2 (IP auto-assigned)
     Value: !Ref ReceiverInstance2
   RouterSecurityGroupId:
     Description: Attach to the C8000V Gi1/Gi2 ENIs in the instance stack
@@ -610,16 +693,16 @@ Outputs:
     Description: Use as the inbound tcp/22 source for the router security group
     Value: !Ref EicEndpointSecurityGroup
   Router1Gi1EniId:
-    Description: Attach as C8000V-1 Gi1 (10.1.1.10, src/dest check disabled)
+    Description: Attach as C8000V-1 Gi1 (10.1.1.30, src/dest check disabled)
     Value: !Ref Router1Gi1Eni
   Router1Gi2EniId:
-    Description: Attach as C8000V-1 Gi2 (10.1.1.40, src/dest check disabled)
+    Description: Attach as C8000V-1 Gi2 (10.1.1.90, src/dest check disabled)
     Value: !Ref Router1Gi2Eni
   Router2Gi1EniId:
-    Description: Attach as C8000V-2 Gi1 (10.1.1.90, src/dest check disabled)
+    Description: Attach as C8000V-2 Gi1 (10.1.1.40, src/dest check disabled)
     Value: !Ref Router2Gi1Eni
   Router2Gi2EniId:
-    Description: Attach as C8000V-2 Gi2 (10.1.1.110, src/dest check disabled)
+    Description: Attach as C8000V-2 Gi2 (10.1.1.100, src/dest check disabled)
     Value: !Ref Router2Gi2Eni
   RouteServerEndpoint1EniAddress:
     Description: Substitute for <RSE-1-IP> in section 9.1

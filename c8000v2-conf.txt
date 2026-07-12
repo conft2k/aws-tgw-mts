@@ -1,69 +1,92 @@
-! C8000V-2 (AZ2) - Gi1 10.1.1.90/27 (RouterSubnet2), Gi2 10.1.1.110/27 (ReceiverSubnet2)
-! BGP to VPC Route Server Endpoint-2 (10.1.1.71, ASN 65100) with BFD health check;
-! standby multicast forwarder (see the ip igmp static-group note on Gi2).
+! C8000V-2 (AZ2) - Gi1 10.1.1.40/27 (RouterSubnet2), Gi2 10.1.1.100/27 (ReceiverSubnet2)
+! Anycast HA (standby): Lo0 10.255.255.1/32 is SHARED with C8000V-1 and is the
+! single GRE tunnel anchor. This router advertises Lo0 to the Route Server
+! WITH AS-path prepending, so the RS prefers C8000V-1 while it is alive.
+! When C8000V-1 fails, RS BFD withdraws the primary path and the VPC routes
+! (anycast Lo0 in the TGW subnet RT, on-prem LAN in the Receiver RT) flip here;
+! the GRE tunnel re-anchors to this router with no on-prem config change.
+! Note: while standby, the overlay BGP session to on-prem stays down (both
+! routers share 172.16.100.2) - it establishes after failover.
+! BGP to VPC Route Server Endpoint-2: 10.1.1.41, ASN 65100, BFD.
 !
 hostname c8000v-2
 !
 ip multicast-routing distributed
 !
+interface Loopback0
+ description Anycast-GRE-anchor (same IP on c8000v-1)
+ ip address 10.255.255.1 255.255.255.255
+!
 interface GigabitEthernet1
  description RouterSubnet2-underlay-RS-peering
- ip address 10.1.1.90 255.255.255.224
+ ip address 10.1.1.40 255.255.255.224
  bfd interval 300 min_rx 300 multiplier 3
  no shutdown
 !
 interface GigabitEthernet2
  description ReceiverSubnet2-multicast
- ip address 10.1.1.110 255.255.255.224
+ ip address 10.1.1.100 255.255.255.224
  ip pim sparse-mode
- ! STANDBY: leave the static-group disabled. If both routers pull the same
- ! group, every receiver gets duplicate packets (TGW does not dedupe and the
- ! two Gi2 interfaces share no segment for a PIM assert). Enable this only
- ! when C8000V-1 is down, or automate the switchover with an EEM applet.
- ! ip igmp static-group 239.1.1.1
+ ! Pull group traffic onto Gi2 so the TGW multicast domain can distribute it.
+ ! Add one line per group.
+ ip igmp static-group 239.1.1.1
  no shutdown
 !
-interface Tunnel101
- description GRE-to-OnPrem-Lo0
- ip address 172.16.101.2 255.255.255.252
+interface Tunnel100
+ description GRE-to-OnPrem-Lo0 (anycast-anchored, single tunnel design)
+ ip address 172.16.100.2 255.255.255.252
  ip pim sparse-mode
- tunnel source GigabitEthernet1
- tunnel destination 192.168.255.1
+ bfd interval 500 min_rx 500 multiplier 3
+ tunnel source Loopback0
+ tunnel destination 172.20.255.1
  ip mtu 1476
  ip tcp adjust-mss 1436
 !
 ! GRE destination (on-prem Lo0) via Gi1 gateway -> RouterRouteTable -> TGW -> DXGW
-ip route 192.168.255.1 255.255.255.255 10.1.1.65
+ip route 172.20.255.1 255.255.255.255 10.1.1.33
 ! Rest of the VPC (other-AZ subnets, EICE) via Gi1 gateway; connected /27s stay preferred
-ip route 10.1.1.0 255.255.255.0 10.1.1.65
+ip route 10.1.1.0 255.255.255.0 10.1.1.33
 !
 ! RP is the on-prem router Lo0
-ip pim rp-address 192.168.255.1
+ip pim rp-address 172.20.255.1
 ! Force PIM RPF for the RP and the source range over the tunnel
-! (the unicast route to Lo0 points at the underlay, where PIM does not run)
-ip mroute 192.168.255.1 255.255.255.255 Tunnel101
-ip mroute 172.20.51.0 255.255.255.0 Tunnel101
+ip mroute 172.20.255.1 255.255.255.255 Tunnel100
+ip mroute 172.20.51.0 255.255.255.0 Tunnel100
 !
-ip prefix-list ONPREM-LAN seq 5 permit 172.20.51.0/24
+! To the Route Server: on-prem LAN (learned over the tunnel) + anycast Lo0
+ip prefix-list RS-OUT seq 5 permit 172.20.51.0/24
+ip prefix-list RS-OUT seq 10 permit 10.255.255.1/32
 ip prefix-list DENY-ALL seq 5 deny 0.0.0.0/0 le 32
 !
+! Standby: triple prepend makes the RS prefer C8000V-1's shorter AS path
+route-map RS-PREPEND permit 10
+ set as-path prepend 65200 65200 65200
+!
 router bgp 65200
- bgp router-id 10.1.1.90
+ bgp router-id 10.1.1.40
  bgp log-neighbor-changes
 
  ! VPC Route Server Endpoint-2 - BFD-based failover
- neighbor 10.1.1.71 remote-as 65100
- neighbor 10.1.1.71 fall-over bfd
+ neighbor 10.1.1.41 remote-as 65100
+ neighbor 10.1.1.41 fall-over bfd
 
- ! On-prem router over the GRE overlay
- neighbor 172.16.101.1 remote-as 65000
+ ! On-prem router over the GRE overlay (establishes only after failover)
+ ! BFD + timers connect 5 compress the takeover time
+ neighbor 172.16.100.1 remote-as 65000
+ neighbor 172.16.100.1 fall-over bfd
+ neighbor 172.16.100.1 timers connect 5
 
  address-family ipv4
-  ! Re-advertise the on-prem LAN (learned over the tunnel) to the Route Server
-  neighbor 10.1.1.71 activate
-  neighbor 10.1.1.71 prefix-list ONPREM-LAN out
+  ! Anycast Lo0 (connected) - RS injects it into the TGW subnet route table
+  network 10.255.255.1 mask 255.255.255.255
+
+  ! Prepend everything sent to the RS -> this router loses best-path while
+  ! C8000V-1 is alive
+  neighbor 10.1.1.41 activate
+  neighbor 10.1.1.41 prefix-list RS-OUT out
+  neighbor 10.1.1.41 route-map RS-PREPEND out
 
   ! Advertise nothing to on-prem (it reaches the VPC via the DX underlay)
-  neighbor 172.16.101.1 activate
-  neighbor 172.16.101.1 prefix-list DENY-ALL out
+  neighbor 172.16.100.1 activate
+  neighbor 172.16.100.1 prefix-list DENY-ALL out
  exit-address-family
